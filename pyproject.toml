@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "symphony-runner"
+version = "0.1.0"
+description = "Reference implementation of the Symphony service specification."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "OpenAI Codex" }]
+dependencies = [
+  "PyYAML>=6.0.2",
+  "python-liquid>=1.12.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+  "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+symphony = "symphony.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["symphony"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
