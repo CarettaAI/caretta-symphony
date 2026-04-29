@@ -164,6 +164,7 @@ defmodule Symphony.RepoPlanner do
       |> agent_message_text()
       |> parse_json_object()
       |> normalize_plan(issue, config, planner: "llm", source: "llm")
+      |> apply_rules_crosscheck(issue, config)
     after
       apply(codex_client, :stop_session, [session])
     end
@@ -203,6 +204,7 @@ defmodule Symphony.RepoPlanner do
     - If a secondary repo might need edits, include it as secondary_repos with edit_allowed=true.
     - If a repo is only background material, include it as read_only_context_repos.
     - If the issue is not a coding/repository task, set coding_task=false and leave repo lists empty.
+    - Route post-call, saved-call, call-history, history-detail, history-tab, recap, follow-up email, and template UI work to the web/customer app repository when one exists. Do not route those issues to a desktop/live-runtime repository unless the issue explicitly names desktop overlay, native capture, transcription, or live in-call behavior.
 
     Planner input JSON:
     #{Jason.encode!(payload)}
@@ -270,6 +272,79 @@ defmodule Symphony.RepoPlanner do
         }
     end
   end
+
+  defp apply_rules_crosscheck(
+         %RepoPlan{coding_task: true, primary_repo: %RepoPlanItem{} = llm_primary} = plan,
+         %Issue{} = issue,
+         %RepositoryPlanningConfig{} = config
+       ) do
+    rules_plan = plan_with_rules(issue, config, "llm:rules_crosscheck")
+    rules_primary = rules_plan.primary_repo
+
+    cond do
+      rules_plan.needs_human or is_nil(rules_primary) ->
+        plan
+
+      rules_primary.slug == llm_primary.slug ->
+        plan
+
+      not Enum.any?(plan.read_only_context_repos, &(&1.slug == rules_primary.slug)) ->
+        plan
+
+      true ->
+        promote_rules_primary(plan, rules_primary, llm_primary)
+    end
+  end
+
+  defp apply_rules_crosscheck(plan, _issue, _config), do: plan
+
+  defp promote_rules_primary(%RepoPlan{} = plan, %RepoPlanItem{} = rules_primary, llm_primary) do
+    promoted =
+      rules_primary
+      |> retag_plan_item("primary", true)
+      |> Map.put(
+        :reason,
+        "#{rules_primary.reason}; promoted over LLM primary #{llm_primary.slug} because the LLM marked this rules-matched repo as read-only context."
+      )
+
+    demoted =
+      llm_primary
+      |> retag_plan_item("read_only_context", false)
+      |> Map.put(
+        :reason,
+        "LLM initially selected this as primary, but rules cross-check promoted #{rules_primary.slug}."
+      )
+
+    secondary =
+      plan.secondary_repos
+      |> Enum.reject(&(&1.slug in [rules_primary.slug, llm_primary.slug]))
+
+    read_only =
+      [demoted | plan.read_only_context_repos]
+      |> Enum.reject(&(&1.slug == rules_primary.slug))
+      |> dedupe_items()
+
+    %{
+      plan
+      | primary_repo: promoted,
+        secondary_repos: secondary,
+        read_only_context_repos: read_only,
+        source: "llm+rules_crosscheck",
+        notes:
+          [
+            plan.notes,
+            "Rules cross-check promoted #{rules_primary.slug} over #{llm_primary.slug}."
+          ]
+          |> Enum.reject(&blank?/1)
+          |> Enum.join(" ")
+    }
+  end
+
+  defp retag_plan_item(%RepoPlanItem{} = item, role, edit_allowed) do
+    %{item | role: role, edit_allowed: edit_allowed}
+  end
+
+  defp blank?(value), do: is_nil(value) or String.trim(to_string(value)) == ""
 
   defp score_repo(%RepositoryConfig{} = repo, text) do
     candidates =

@@ -57,7 +57,48 @@ defmodule Symphony.AgentRunner do
         &String.contains?(normalized, &1)
       )
 
-    String.contains?(normalized, "linear") and blocker and completed
+    String.contains?(normalized, "linear") and blocker and completed and
+      not agent_reported_incomplete_or_blocked?(text)
+  end
+
+  def agent_reported_incomplete_or_blocked?(text) do
+    normalized = String.downcase(text || "")
+
+    direct_negative =
+      Enum.any?(
+        [
+          "blocked; no code changed",
+          "blocked; no files changed",
+          "no code changed",
+          "no files changed",
+          "no implementation changes were possible",
+          "no implementation changes were made",
+          "no validation was run because no implementation",
+          "could not implement",
+          "couldn't implement",
+          "unable to implement"
+        ],
+        &String.contains?(normalized, &1)
+      )
+
+    blocked_by_guardrail =
+      String.contains?(normalized, "blocked") and
+        Enum.any?(
+          [
+            "edit_allowed: false",
+            "read-only",
+            "read only",
+            "guardrail",
+            "wrong repo",
+            "repo plan",
+            "does not contain the target ui",
+            "does not contain the relevant ui",
+            "does not contain the target surface"
+          ],
+          &String.contains?(normalized, &1)
+        )
+
+    direct_negative or blocked_by_guardrail
   end
 
   def agent_reported_unresolved_external_blocker?(text) do
@@ -348,6 +389,19 @@ defmodule Symphony.AgentRunner do
         end
 
       cond do
+        agent_reported_incomplete_or_blocked?(turn_result.agent_message_text) ->
+          {:halt,
+           %AgentRunResult{
+             issue_id: issue.id,
+             issue_identifier: issue.identifier,
+             normal: false,
+             reason: "agent_reported_blocked_or_incomplete",
+             retryable: false,
+             blocked: true,
+             workspace_path: workspace_path,
+             repo_plan: repo_plan
+           }}
+
         agent_reported_unresolved_external_blocker?(turn_result.agent_message_text) ->
           {:halt,
            %AgentRunResult{

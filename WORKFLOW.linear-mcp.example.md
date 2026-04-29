@@ -61,12 +61,12 @@ repositories:
       local_path: /opt/symphony/example-repos/client/desktop-runtime
       remote_url: https://github.com/ExampleOrg/desktop-runtime.git
       aliases: ["desktop-runtime", "electron shell", "overlay", "live workflow", "local transcription", "runtime orchestrator"]
-      description: Desktop shell and live-session runtime; local capture, transcript batching, in-app suggestions, and host-side provider calls.
+      description: Desktop shell and live in-call runtime; local capture, transcript batching, in-app suggestions, and host-side provider calls. Do not choose this for saved-call history pages, post-call detail tabs, or follow-up email drafts unless the issue explicitly says desktop overlay or live runtime.
     - slug: ExampleOrg/web-console
       local_path: /opt/symphony/example-repos/product/web-console
       remote_url: https://github.com/ExampleOrg/web-console.git
-      aliases: ["web-console", "web app", "Next.js", "onboarding", "settings", "history", "calendar", "CRM", "in-app assistant"]
-      description: Customer-facing web console, authenticated routes, calendar/CRM settings, history views, folders, and browser-side gateway proxy.
+      aliases: ["web-console", "web app", "Next.js", "onboarding", "settings", "history", "history tab", "post-call", "saved call", "call details", "follow-up email", "email draft", "calendar", "CRM", "in-app assistant"]
+      description: Customer-facing web console, authenticated routes, calendar/CRM settings, saved-call history views, post-call detail tabs, follow-up email drafts/templates, folders, and browser-side gateway proxy.
     - slug: ExampleOrg/shared-contracts
       local_path: /opt/symphony/example-repos/libs/shared-contracts
       aliases: ["shared-contracts", "shared schema", "shared types", "API contracts"]

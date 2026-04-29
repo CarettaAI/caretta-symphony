@@ -158,6 +158,47 @@ defmodule Symphony.RepoPlannerHttpTest do
     refute plan.needs_human
   end
 
+  test "rules planner routes post-call history tab work to webapp over live desktop runtime" do
+    config = %RepositoryPlanningConfig{
+      enabled: true,
+      planner: "rules",
+      repositories: [
+        %RepositoryConfig{
+          slug: "CarettaAI/Project-N",
+          aliases: ["Project-N", "desktop", "electron", "overlay", "live runtime"],
+          description:
+            "Desktop app and live in-call runtime; not saved-call history pages or post-call detail tabs."
+        },
+        %RepositoryConfig{
+          slug: "CarettaAI/caretta-webapp",
+          aliases: ["webapp", "history", "history tab", "post-call", "follow-up email"],
+          description:
+            "Customer-facing web app, saved-call history, post-call detail tabs, and follow-up email drafts."
+        }
+      ]
+    }
+
+    issue = %Issue{
+      id: "CRTTA-283",
+      identifier: "CRTTA-283",
+      title: "Drafted follow-up email tab",
+      description: "A new tab after the call with a pre-drafted email recap in the post-call UI.",
+      state: "Todo",
+      labels: ["codex"]
+    }
+
+    plan =
+      RepoPlanner.plan_repositories(
+        issue,
+        config,
+        %CodingContextConfig{},
+        %CodingClassification{is_coding_task: true, source: "rules"}
+      )
+
+    assert plan.primary_repo.slug == "CarettaAI/caretta-webapp"
+    refute plan.needs_human
+  end
+
   @tag :tmp_dir
   test "llm planner normalizes primary secondary and read-only repos", %{tmp_dir: tmp_dir} do
     Process.put(:repo_planner_parent, self())
@@ -206,7 +247,76 @@ defmodule Symphony.RepoPlannerHttpTest do
     assert_receive {:planner_session_started, %CodexConfig{effort: "low"}, ^tmp_dir}
     assert_receive {:planner_prompt, prompt, [capture_agent_text: true]}
     assert prompt =~ "Use only repository slugs listed in the input catalog"
+    assert prompt =~ "Route post-call, saved-call, call-history"
     assert_receive :planner_stopped
+  end
+
+  @tag :tmp_dir
+  test "llm planner promotes rules-matched read-only repo when llm chose wrong primary", %{
+    tmp_dir: tmp_dir
+  } do
+    Process.put(:repo_planner_parent, self())
+
+    Process.put(
+      :repo_planner_response,
+      Jason.encode!(%{
+        "coding_task" => true,
+        "primary_repo" => %{
+          "slug" => "CarettaAI/Project-N",
+          "reason" => "The issue says post-call and call summary."
+        },
+        "read_only_context_repos" => [
+          %{"slug" => "CarettaAI/caretta-webapp", "reason" => "Contains history tabs."}
+        ],
+        "confidence" => 0.86,
+        "needs_human" => false,
+        "notes" => "Start in desktop."
+      })
+    )
+
+    config = %RepositoryPlanningConfig{
+      enabled: true,
+      planner: "llm",
+      repositories: [
+        %RepositoryConfig{
+          slug: "CarettaAI/Project-N",
+          aliases: ["Project-N", "desktop", "electron", "overlay", "live runtime"],
+          description: "Desktop app and live in-call runtime."
+        },
+        %RepositoryConfig{
+          slug: "CarettaAI/caretta-webapp",
+          aliases: ["webapp", "history", "history tab", "post-call", "follow-up email"],
+          description:
+            "Customer-facing web app, saved-call history, post-call detail tabs, and follow-up email drafts."
+        }
+      ]
+    }
+
+    issue = %Issue{
+      id: "CRTTA-283",
+      identifier: "CRTTA-283",
+      title: "Drafted follow-up email tab",
+      description: "A new tab after the call with a pre-drafted email recap in the post-call UI.",
+      state: "Todo",
+      labels: ["codex"]
+    }
+
+    plan =
+      RepoPlanner.plan_repositories(
+        issue,
+        config,
+        %CodingContextConfig{},
+        %CodingClassification{is_coding_task: true, source: "rules"},
+        codex_config: %CodexConfig{command: "fake"},
+        workspace_path: tmp_dir,
+        codex_client: FakePlannerCodexClient
+      )
+
+    assert plan.source == "llm+rules_crosscheck"
+    assert plan.primary_repo.slug == "CarettaAI/caretta-webapp"
+    assert plan.primary_repo.edit_allowed
+    assert hd(plan.read_only_context_repos).slug == "CarettaAI/Project-N"
+    refute hd(plan.read_only_context_repos).edit_allowed
   end
 
   @tag :tmp_dir

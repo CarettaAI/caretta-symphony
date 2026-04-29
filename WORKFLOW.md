@@ -62,13 +62,13 @@ repositories:
       remote_url: https://github.com/CarettaAI/Project-N.git
       base_branch: dev
       aliases: ["Project-N", "desktop", "electron", "smart notch", "overlay", "local transcription", "project-n-lambdas"]
-      description: Desktop app and live runtime; Electron shell, meeting detection, local capture, transcription hooks, CRM bridge, package work, and desktop packaging.
+      description: Desktop app and live in-call runtime; Electron shell, meeting detection, local capture, transcription hooks, CRM bridge, package work, and desktop packaging. Do not choose this for saved-call history pages, post-call detail tabs, or follow-up email drafts unless the issue explicitly says desktop overlay or live runtime.
     - slug: CarettaAI/caretta-webapp
       local_path: /Users/omarelamin/Documents/Caretta/repos/caretta-app/caretta-webapp
       remote_url: https://github.com/CarettaAI/caretta-webapp.git
       base_branch: dev
-      aliases: ["caretta-webapp", "webapp", "web app", "Next.js", "onboarding", "settings", "history", "calendar", "CRM"]
-      description: Customer-facing web app, authenticated routes, product UI, onboarding, settings, history, calendar, CRM, and browser API routes.
+      aliases: ["caretta-webapp", "webapp", "web app", "Next.js", "onboarding", "settings", "history", "history tab", "post-call", "saved call", "call details", "follow-up email", "email draft", "calendar", "CRM"]
+      description: Customer-facing web app, authenticated routes, product UI, onboarding, settings, saved-call history, post-call detail tabs, follow-up email drafts/templates, calendar, CRM, and browser API routes.
     - slug: CarettaAI/caretta-app-shared
       local_path: /Users/omarelamin/Documents/Caretta/repos/caretta-app/caretta-app-shared
       base_branch: dev

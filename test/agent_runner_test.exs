@@ -33,6 +33,24 @@ defmodule Symphony.AgentRunnerTest do
     refute AgentRunner.agent_reported_linear_delivery_blocker?(
              "Linear rejected the initial read; continuing repo inspection."
            )
+
+    refute AgentRunner.agent_reported_linear_delivery_blocker?(
+             "Blocked; no code changed. The workspace marks `caretta-webapp` as `edit_allowed: false`, and Project-N does not contain the target UI. Linear MCP writes were rejected."
+           )
+  end
+
+  test "agent reported incomplete or guardrail-blocked work is not delivery-ready" do
+    assert AgentRunner.agent_reported_incomplete_or_blocked?(
+             "Blocked; no code changed. The workspace still marks `caretta-webapp` as `edit_allowed: false`. No validation was run because no implementation changes were possible."
+           )
+
+    assert AgentRunner.agent_reported_incomplete_or_blocked?(
+             "Blocked by repo plan guardrail: the selected repo does not contain the target UI."
+           )
+
+    refute AgentRunner.agent_reported_incomplete_or_blocked?(
+             "Completed: implementation is committed and pushed. Validation passed. Linear MCP writes were rejected."
+           )
   end
 
   test "agent reported unresolved external blocker detects unapplied data operations" do
@@ -80,6 +98,20 @@ defmodule Symphony.AgentRunnerTest do
              %StructTracker{parent: self()},
              issue,
              "Completed: PR is open. Blocker: Linear MCP writes were rejected. Missing Postgres URL; the data migration was not run.",
+             handoff_state: "In Review",
+             workspace_path: "/tmp/symphony-test-workspace"
+           )
+
+    refute_received {:struct_tracker_save_state, "ABC-1", "In Review"}
+  end
+
+  test "delivery fallback refuses blocked no-code handoff" do
+    issue = %Issue{id: "1", identifier: "ABC-1", title: "Ready", state: "In Progress"}
+
+    refute AgentRunner.try_delivery_fallback(
+             %StructTracker{parent: self()},
+             issue,
+             "Blocked; no code changed. The target repo is read-only and does not contain the relevant UI. Linear MCP writes were rejected.",
              handoff_state: "In Review",
              workspace_path: "/tmp/symphony-test-workspace"
            )
