@@ -11,9 +11,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/python3</string>
-    <string>-m</string>
-    <string>symphony</string>
+    <string>/opt/symphony/runner/symphony</string>
     <string>/opt/symphony/config/WORKFLOW.linear-mcp.example.md</string>
   </array>
 

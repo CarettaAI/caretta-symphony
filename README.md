@@ -2,7 +2,7 @@
 
 Caretta Symphony runs many Codex agents from Linear, across many repositories, with a live dashboard for the whole queue.
 
-It is an independent Python implementation of OpenAI's draft [Symphony service specification](https://github.com/openai/symphony/blob/main/SPEC.md). OpenAI defined the core pattern: poll Linear, create an isolated workspace, run a coding agent, and reconcile the issue state. Caretta Symphony keeps that model and adds the operating layer we needed for a real multi-repo product.
+It is an independent Elixir implementation of OpenAI's draft [Symphony service specification](https://github.com/openai/symphony/blob/main/SPEC.md). OpenAI defined the core pattern: poll Linear, create an isolated workspace, run a coding agent, and reconcile the issue state. Caretta Symphony keeps that model and adds the operating layer we needed for a real multi-repo product.
 
 The core value is control: get the work out of the issue tracker, put each agent in the right repos, and see what all of them are doing while they run.
 
@@ -61,7 +61,7 @@ Agents hand work to a review state. Symphony can move an issue to `Done` only af
 
 OpenAI's `openai/symphony` repository contains a language-agnostic spec and an experimental Elixir implementation.
 
-Caretta Symphony is not an official OpenAI project. It does not include OpenAI's reference implementation code. It implements the public Symphony spec in Python and extends it for:
+Caretta Symphony is not an official OpenAI project. It does not include OpenAI's reference implementation code. It implements the public Symphony spec in Elixir and extends it for:
 
 - multi-repo product work
 - repo planning before dispatch
@@ -73,7 +73,8 @@ Caretta Symphony is not an official OpenAI project. It does not include OpenAI's
 ## Install
 
 ```bash
-python3 -m pip install -e ".[dev]"
+mix deps.get
+mix escript.build
 ```
 
 ## Run
@@ -152,7 +153,7 @@ Issue: {{ issue.identifier }} - {{ issue.title }}
 Start Symphony:
 
 ```bash
-symphony WORKFLOW.md --port 8765
+./symphony WORKFLOW.md --port 8765
 ```
 
 Open `http://127.0.0.1:8765` for the dashboard.
@@ -173,13 +174,14 @@ The status surface is unauthenticated. Keep `server.host` bound to `127.0.0.1` u
 ## Testing
 
 ```bash
-python3 -m pytest
+mix test
 ```
 
 ## Project layout
 
-- `symphony/` - service implementation
-- `tests/` - pytest coverage
+- `lib/symphony/` - service implementation
+- `test/` - ExUnit coverage
+- `mix.exs` - Elixir project metadata and escript configuration
 - `docs/IMPLEMENTATION.md` - implementation notes and conformance summary
 - `WORKFLOW.linear-mcp.example.md` - anonymized multi-repo Linear MCP workflow
 - `launchd/` - example macOS launch agent

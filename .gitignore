@@ -29,6 +29,13 @@ dist/
 build/
 *.egg-info/
 
+# Elixir
+_build/
+deps/
+.elixir_ls/
+tmp/
+/symphony
+
 # JavaScript and frontend build artifacts
 node_modules/
 npm-debug.log*

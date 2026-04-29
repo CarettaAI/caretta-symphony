@@ -14,8 +14,8 @@ Implemented:
 - required label gating via `tracker.required_labels`
 - deterministic sanitized workspaces below `workspace.root`
 - workspace hooks with timeout handling and spec-defined fatal/best-effort behavior
-- strict Liquid prompt rendering with `issue` and `attempt`
-- Codex app-server subprocess integration using JSON-RPC JSONL over stdio
+- strict prompt variable rendering with `issue` and `attempt`
+- Codex app-server subprocess integration using JSON-RPC JSONL over stdio from Elixir ports
 - continuation turns on the same thread during a worker lifetime
 - retry queue with continuation retries and exponential failure backoff
 - reconciliation that cancels terminal/non-active/stalled runs
@@ -27,7 +27,7 @@ Implementation-defined choices:
 
 - existing non-directory workspace paths fail safely
 - secrets are validated by presence only and are not logged
-- no durable database is used; retry/running state is in-memory
+- no durable database is used; retry/running state is in-memory with a JSON runtime snapshot under the workspace root
 - `tracker.kind: linear_mcp` uses Codex app-server's `mcpServer/tool/call` gateway and the configured `tracker.mcp_server`/`tracker.mcp_command`
 - `linear_mcp` uses the issue identifier as the internal issue ID because the Linear connector list output does not expose the Linear GraphQL UUID
 - `linear_graphql` dynamic tool calls are handled if the agent app-server asks for them, but dynamic tool advertisement is not enabled because the generated schema for the installed Codex app-server version does not expose `dynamicTools` on `thread/start`
