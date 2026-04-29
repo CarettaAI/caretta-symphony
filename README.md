@@ -1,9 +1,58 @@
-# Symphony Runner
+# Caretta Symphony
 
-This is a Python reference implementation of the draft Symphony service specification:
-https://github.com/openai/symphony/blob/main/SPEC.md
+Caretta Symphony is a Python implementation of OpenAI's draft [Symphony service specification](https://github.com/openai/symphony/blob/main/SPEC.md).
 
-It implements the core daemon layers: `WORKFLOW.md` parsing and reload, typed config resolution, Linear issue reads, per-issue workspaces and hooks, Codex app-server JSONL orchestration, retry/reconciliation logic, structured logs, and an optional local status API.
+Symphony turns project work into isolated, autonomous implementation runs. It watches Linear for eligible issues, creates a per-issue workspace, launches Codex in app-server mode, and keeps the agent working until the issue reaches the workflow-defined handoff state.
+
+> [!WARNING]
+> Caretta Symphony is early automation software for trusted engineering environments. Review the workflow, sandbox, repository, and credential settings before running it on untrusted issues or repositories.
+
+## Relationship to OpenAI Symphony
+
+OpenAI's `openai/symphony` repository provides two things:
+
+1. A language-agnostic `SPEC.md` that defines the service layers and behavior.
+2. An experimental Elixir/OTP implementation intended as a reference and evaluation prototype.
+
+Caretta Symphony follows the same core model:
+
+- Poll Linear for candidate work.
+- Create or reuse an isolated workspace per issue.
+- Render a repository-owned `WORKFLOW.md` prompt.
+- Launch Codex in app-server mode inside the workspace.
+- Stream Codex events back into an orchestrator.
+- Reconcile issue state, retry transient failures, and stop runs that are no longer eligible.
+- Expose structured logs and an optional local status surface.
+
+This project is not an official OpenAI project. It is an independent Python implementation built from the public Symphony specification.
+
+## What's different
+
+Caretta Symphony keeps the core Symphony shape, then adds production-oriented policy around the places where real agent operations tend to need more structure.
+
+- **Python runtime**: standard-library asyncio service with a small dependency set.
+- **Linear MCP mode**: can read and update Linear through Codex app-server's MCP gateway, so a connected Codex Linear session can be used instead of a raw Linear API key.
+- **Repository planning**: asks a lightweight planner to choose the primary repo, editable secondary repos, and read-only context repos from a configured repo catalog.
+- **Multi-repo workspaces**: checks out selected repositories under `repos/`, records `repo-plan.json`, and quarantines incompatible legacy workspaces.
+- **Branch safety**: installs a pre-push guard so agents can only push the Symphony-prepared branch for each repo.
+- **Coding context injection**: can inject configured Codex skills into coding issues, with rules-based, always-on, or LLM-based classification.
+- **Continuation turns**: sends a fresh Linear issue snapshot on continuation instead of replaying the original task.
+- **Review gate**: agents hand off completed PR work to a review state; Symphony can move the issue to `Done` only after required GitHub PRs are merged into the configured base branch.
+- **Dashboard summaries**: optional local status API and HTML dashboard with runtime counts, recent activity, token totals, and LLM-generated run summaries.
+- **Delivery fallback**: if an in-agent Linear write is rejected after work is complete, the orchestrator can perform a tracker-owned workpad/state handoff.
+
+## How it works
+
+1. Load `WORKFLOW.md`.
+2. Resolve typed runtime config from YAML front matter.
+3. Poll Linear for issues in active states.
+4. Apply dispatch gates such as labels, blockers, concurrency, and current issue state.
+5. Create a deterministic workspace for each issue.
+6. Optionally plan and materialize the repository set for that issue.
+7. Launch `codex app-server` in the workspace.
+8. Send the rendered workflow prompt to Codex.
+9. Track events, token usage, retries, summaries, and stalls.
+10. Release the claim when the issue leaves active states or reaches a terminal state.
 
 ## Install
 
@@ -11,9 +60,9 @@ It implements the core daemon layers: `WORKFLOW.md` parsing and reload, typed co
 python3 -m pip install -e ".[dev]"
 ```
 
-## Workflow File
+## Run
 
-Create `WORKFLOW.md` in the repository you want Symphony to run from:
+Create a `WORKFLOW.md` in the repository you want Symphony to run from:
 
 ```markdown
 ---
@@ -23,6 +72,7 @@ tracker:
   project_slug: my-project
   active_states: ["Todo", "In Progress", "Rework", "Merging"]
   review_states: ["In Review", "Merging"]
+  terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
   handoff_state: In Review
   done_state: Done
   merge_base_branch: dev
@@ -31,6 +81,7 @@ workspace:
   root: ./.symphony-workspaces
 agent:
   max_concurrent_agents: 3
+  max_turns: 20
 codex:
   command: codex app-server
   effort: medium
@@ -77,17 +128,17 @@ Issue: {{ issue.identifier }} - {{ issue.title }}
 {{ issue.description }}
 ```
 
-Then run:
+Then start the service:
 
 ```bash
 symphony WORKFLOW.md
 ```
 
-If no positional path is supplied, `symphony` uses `./WORKFLOW.md`. Do not pass `--once` for normal operation; without it, Symphony keeps polling until the process is stopped.
+If no path is supplied, `symphony` uses `./WORKFLOW.md`.
 
-### Using the Linear MCP Connector
+## Linear MCP mode
 
-If the Linear connector is enabled in Codex, Symphony can read issues through Codex app-server's MCP gateway instead of a raw Linear API key:
+If the Linear connector is enabled in Codex, Symphony can use Codex app-server's MCP gateway instead of a raw Linear API key:
 
 ```yaml
 tracker:
@@ -105,33 +156,26 @@ tracker:
   mcp_server: codex_apps
 ```
 
-`linear_mcp` is an implementation extension. It uses the connected Linear OAuth session exposed by `codex app-server`, and it uses the Linear issue identifier, for example `ENG-136`, as Symphony's stable issue ID because the connector tool does not expose Linear's GraphQL UUID in list responses.
+`linear_mcp` uses the Linear issue identifier, for example `ENG-136`, as the stable issue ID because the connector list response does not expose Linear's GraphQL UUID.
 
-`tracker.required_labels` is a hard dispatch and reconciliation gate. With `["codex"]`, Symphony ignores active issues that do not have the `codex` label and stops an in-flight worker if that label is removed.
+## Repository planning
 
-`context.coding` injects a configured Codex skill into the first prompt for issues classified as coding work. Set `classifier: llm` to run a short Codex classifier turn over the current Linear issue before deciding whether to inject the skill. `classification_fallback: inject` is the safer default because a false negative is worse than giving a non-coding task extra architecture context. `classifier: rules` keeps the older label/keyword behavior, and `classifier: always` injects context for every dispatched issue.
-
-On continuation turns, Symphony sends a fresh Linear issue snapshot, including the current description, labels, state, URL, and `updated_at`. If an issue changes while an agent is already running, the continuation prompt tells the agent that the current Linear text overrides earlier assumptions.
-
-The dashboard at `/` shows service status, running agents, continuation queues, failure retries, blocked issues, token totals, recent activity, and an LLM-generated work summary for each active agent. A clean worker exit appears as `Continuing`, because Symphony re-checks the issue after a short delay and only releases the claim when the issue is no longer eligible. Keep the configured handoff state out of `tracker.active_states`; moving an issue there is how the agent delivers work and releases the Symphony claim. By default agents hand off completed PR work to `In Review`; Symphony moves review-state issues to `Done` only after all required GitHub PRs are merged into `tracker.merge_base_branch`. Dashboard summaries are throttled by `dashboard.summaries.update_interval_ms` and include whether the issue appears to need human attention.
-
-`repositories` makes repo selection explicit before Codex starts. With `planner: llm`, Symphony asks a short planning turn to choose a primary repo, optional secondary repos, and read-only context repos from `repositories.known`. The selected repos are checked out under the issue workspace:
+With `repositories.enabled: true`, Symphony chooses a repo plan before Codex starts. The selected repositories are checked out under the issue workspace:
 
 ```text
 .symphony-workspaces/ENG-251/
   repo-plan.json
+  .symphony-workspace.json
   repos/
     desktop-runtime/
     model-gateway/
 ```
 
-If an existing issue workspace is a legacy single-repo checkout or contains a planned repo with the wrong remote, Symphony quarantines it under `_quarantine/` before creating the planned multi-repo layout. If the planner cannot identify a clear primary repo and `block_on_needs_human` is true, the issue is blocked before Codex edits files and the dashboard shows the repo-plan reason.
-
-For macOS background operation, adapt [launchd/com.symphony.linear-mcp.example.plist](launchd/com.symphony.linear-mcp.example.plist). It is an example file only; installing it into `~/Library/LaunchAgents` will make launchd keep Symphony running.
+If an existing workspace is a legacy single-repo checkout or contains a planned repo with the wrong remote, Symphony quarantines it under `_quarantine/` before creating the planned layout.
 
 ## Status API
 
-The optional HTTP status surface starts when `--port` is passed or `server.port` is set in the workflow front matter.
+Set `server.port` in `WORKFLOW.md` or pass `--port`:
 
 ```bash
 symphony WORKFLOW.md --port 8765
@@ -144,15 +188,41 @@ Endpoints:
 - `GET /api/v1/<issue_identifier>`
 - `POST /api/v1/refresh`
 
-## Security Posture
+The status surface is unauthenticated and is intended for local trusted operation. Keep `server.host` bound to `127.0.0.1` unless you put it behind your own access controls.
 
-This implementation is designed for trusted automation environments. Its default Codex posture is:
+## macOS background operation
+
+For launchd-based background operation, adapt [`launchd/com.symphony.linear-mcp.example.plist`](launchd/com.symphony.linear-mcp.example.plist). The file is illustrative; replace every path and command with your local installation layout.
+
+## Project layout
+
+- `symphony/`: service implementation
+- `tests/`: pytest coverage for workflow parsing, tracker clients, workspace materialization, orchestration, Codex app-server behavior, and review gating
+- `docs/IMPLEMENTATION.md`: implementation notes and conformance summary
+- `WORKFLOW.linear-mcp.example.md`: larger real-world-style workflow example with anonymized repos
+- `launchd/`: example macOS launch agent
+
+## Testing
+
+```bash
+python3 -m pytest
+```
+
+## Security posture
+
+This implementation is designed for trusted automation environments. Its default posture in the example workflow is high-trust:
 
 - `approval_policy: never`
 - `thread_sandbox: workspace-write`
-- `turn_sandbox_policy: {"type": "workspaceWrite", "networkAccess": true, "writableRoots": [workspace_path]}`
-- app-server command/file approval prompts are answered with `acceptForSession`
-- app-server tool approval prompts are answered with `Approve this Session` when that option is available
-- generic app-server tool input prompts receive a non-interactive fallback answer so unattended MCP calls do not stall
+- `turn_sandbox_policy: {"type": "workspaceWrite", "networkAccess": true}`
+- app-server approval prompts are answered for the session when the configured policy allows it
+- workspace and repository paths are normalized before use
+- branch guards prevent pushing unexpected refs from agent workspaces
 
-The workspace root and per-issue workspace path are still validated before launch, and the Codex process is only started with the per-issue workspace as `cwd`. Tighten the Codex approval/sandbox settings in `WORKFLOW.md` before using this with untrusted tracker data, repositories, hooks, or credentials.
+Tighten Codex approval and sandbox settings before using Symphony with untrusted tracker data, repositories, hooks, or credentials.
+
+## License
+
+Caretta Symphony is licensed under the [Apache License 2.0](LICENSE).
+
+The OpenAI Symphony project is also licensed under Apache-2.0. This project implements OpenAI's public Symphony specification and does not include OpenAI's reference implementation code.

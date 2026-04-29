@@ -1,0 +1,6 @@
+Caretta Symphony
+Copyright 2026 CarettaAI
+
+Caretta Symphony is an independent Python implementation of OpenAI's
+public Symphony service specification. It is not an official OpenAI
+project and does not include OpenAI's reference implementation code.
