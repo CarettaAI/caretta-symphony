@@ -32,6 +32,7 @@ defmodule Symphony.Orchestrator do
   @continuation_retry_ms 1_000
   @default_call_timeout_ms 5_000
   @persist_coalesce_ms 500
+  @review_reconcile_timeout_ms 30_000
   @snapshot_cache_table :symphony_orchestrator_snapshot_cache
   @state_file_name ".symphony-state.json"
 
@@ -43,6 +44,7 @@ defmodule Symphony.Orchestrator do
             refreshing: false,
             refresh_timer_ref: nil,
             persist_timer_ref: nil,
+            review_task: nil,
             worker_tasks: %{},
             summary_tasks: %{},
             agent_runner: Symphony.AgentRunner,
@@ -247,6 +249,37 @@ defmodule Symphony.Orchestrator do
      |> publish_snapshot_cache()}
   end
 
+  def handle_info({ref, {:review_reconcile_result, result}}, orchestrator)
+      when is_reference(ref) do
+    case orchestrator.review_task do
+      %{ref: ^ref} = task_meta ->
+        Process.demonitor(ref, [:flush])
+        if task_meta.timer_ref, do: Process.cancel_timer(task_meta.timer_ref)
+        log_review_reconcile_result(result)
+        {:noreply, %{orchestrator | review_task: nil}}
+
+      _ ->
+        {:noreply, orchestrator}
+    end
+  end
+
+  def handle_info({:review_reconcile_timeout, ref}, orchestrator) when is_reference(ref) do
+    case orchestrator.review_task do
+      %{ref: ^ref, task: task} ->
+        Process.demonitor(ref, [:flush])
+        shutdown_task(task)
+
+        Logging.log_event(:warning, "review_reconcile_timed_out",
+          timeout_ms: review_reconcile_timeout_ms()
+        )
+
+        {:noreply, %{orchestrator | review_task: nil}}
+
+      _ ->
+        {:noreply, orchestrator}
+    end
+  end
+
   def handle_info({:DOWN, ref, :process, _pid, reason}, orchestrator) do
     {issue_id, worker_tasks} = Map.pop(orchestrator.worker_tasks, ref)
     {summary_meta, summary_tasks} = Map.pop(orchestrator.summary_tasks, ref)
@@ -277,6 +310,14 @@ defmodule Symphony.Orchestrator do
           |> publish_snapshot_cache()
 
         {:noreply, orchestrator}
+
+      orchestrator.review_task && orchestrator.review_task.ref == ref ->
+        if orchestrator.review_task.timer_ref,
+          do: Process.cancel_timer(orchestrator.review_task.timer_ref)
+
+        Logging.log_event(:warning, "review_reconcile_task_exited", reason: inspect(reason))
+
+        {:noreply, %{orchestrator | review_task: nil}}
 
       true ->
         {:noreply, orchestrator}
@@ -314,6 +355,14 @@ defmodule Symphony.Orchestrator do
       Process.demonitor(ref, [:flush])
       shutdown_task(meta.task)
     end)
+
+    if orchestrator.review_task do
+      if orchestrator.review_task.timer_ref,
+        do: Process.cancel_timer(orchestrator.review_task.timer_ref)
+
+      Process.demonitor(orchestrator.review_task.ref, [:flush])
+      shutdown_task(orchestrator.review_task.task)
+    end
 
     if orchestrator.persist_timer_ref, do: Process.cancel_timer(orchestrator.persist_timer_ref)
     delete_snapshot_cache()
@@ -365,7 +414,6 @@ defmodule Symphony.Orchestrator do
       }
 
       orchestrator = process_due_retries(orchestrator, tracker, config)
-      orchestrator = reconcile_review_issues(orchestrator, tracker, config)
       candidates = call_tracker(tracker, :fetch_candidate_issues, [])
 
       orchestrator =
@@ -383,6 +431,8 @@ defmodule Symphony.Orchestrator do
             acc
           end
         end)
+
+      orchestrator = safe_reconcile_review_issues(orchestrator, tracker, config)
 
       state = %{
         orchestrator.state
@@ -446,7 +496,6 @@ defmodule Symphony.Orchestrator do
     try do
       ConfigManager.validate_for_dispatch!(manager)
 
-      orchestrator = reconcile_review_issues(orchestrator, tracker, config)
       candidates = call_tracker(tracker, :fetch_candidate_issues, [])
 
       orchestrator =
@@ -473,7 +522,10 @@ defmodule Symphony.Orchestrator do
           last_poll_error: nil
       }
 
-      persist_state(%{orchestrator | state: state})
+      orchestrator
+      |> Map.put(:state, state)
+      |> persist_state()
+      |> start_review_reconciliation(tracker, config)
     rescue
       error ->
         state = %{
@@ -1012,6 +1064,113 @@ defmodule Symphony.Orchestrator do
       true ->
         true
     end
+  end
+
+  defp start_review_reconciliation(
+         %__MODULE__{} = orchestrator,
+         tracker,
+         %ServiceConfig{} = config
+       ) do
+    cond do
+      !review_reconcile_supported?(tracker, config) ->
+        orchestrator
+
+      orchestrator.review_task ->
+        orchestrator
+
+      is_nil(orchestrator.task_supervisor) ->
+        safe_reconcile_review_issues(orchestrator, tracker, config)
+
+      true ->
+        task =
+          Task.Supervisor.async_nolink(orchestrator.task_supervisor, fn ->
+            {:review_reconcile_result, run_review_reconciliation(orchestrator, tracker, config)}
+          end)
+
+        timer_ref =
+          Process.send_after(
+            self(),
+            {:review_reconcile_timeout, task.ref},
+            review_reconcile_timeout_ms()
+          )
+
+        %{
+          orchestrator
+          | review_task: %{
+              ref: task.ref,
+              task: task,
+              timer_ref: timer_ref,
+              started_at: Utils.now_utc()
+            }
+        }
+    end
+  end
+
+  defp safe_reconcile_review_issues(
+         %__MODULE__{} = orchestrator,
+         tracker,
+         %ServiceConfig{} = config
+       ) do
+    if review_reconcile_supported?(tracker, config) do
+      parent = self()
+      ref = make_ref()
+
+      {pid, monitor_ref} =
+        spawn_monitor(fn ->
+          send(parent, {ref, run_review_reconciliation(orchestrator, tracker, config)})
+        end)
+
+      receive do
+        {^ref, result} ->
+          Process.demonitor(monitor_ref, [:flush])
+          log_review_reconcile_result(result)
+          orchestrator
+
+        {:DOWN, ^monitor_ref, :process, ^pid, reason} ->
+          Logging.log_event(:warning, "review_reconcile_task_exited", reason: inspect(reason))
+          orchestrator
+      after
+        review_reconcile_timeout_ms() ->
+          Process.demonitor(monitor_ref, [:flush])
+          Process.exit(pid, :kill)
+
+          Logging.log_event(:warning, "review_reconcile_timed_out",
+            timeout_ms: review_reconcile_timeout_ms()
+          )
+
+          orchestrator
+      end
+    else
+      orchestrator
+    end
+  end
+
+  defp run_review_reconciliation(orchestrator, tracker, config) do
+    reconcile_review_issues(orchestrator, tracker, config)
+    :ok
+  rescue
+    error ->
+      {:error, Exception.message(error)}
+  catch
+    kind, reason ->
+      {:error, "#{kind}: #{inspect(reason)}"}
+  end
+
+  defp review_reconcile_supported?(tracker, %ServiceConfig{} = config),
+    do: config.tracker.review_states != [] and tracker_supports?(tracker, :save_issue_state)
+
+  defp review_reconcile_timeout_ms do
+    Application.get_env(
+      :caretta_symphony,
+      :review_reconcile_timeout_ms,
+      @review_reconcile_timeout_ms
+    )
+  end
+
+  defp log_review_reconcile_result(:ok), do: :ok
+
+  defp log_review_reconcile_result({:error, reason}) do
+    Logging.log_event(:warning, "review_reconcile_failed", reason: Utils.truncate(reason, 500))
   end
 
   def reconcile_review_issues(%__MODULE__{} = orchestrator, tracker, %ServiceConfig{} = config) do

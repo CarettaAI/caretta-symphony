@@ -53,6 +53,27 @@ defmodule Symphony.OrchestratorTest do
     end
   end
 
+  defmodule FastRunner do
+    defstruct []
+
+    def new(_manager, _tracker), do: %__MODULE__{}
+
+    def run_issue(_runner, issue, attempt, _event_callback) do
+      send(Application.fetch_env!(:caretta_symphony, :runner_parent), {
+        :runner_called,
+        issue.identifier,
+        attempt
+      })
+
+      %Symphony.AgentRunner.AgentRunResult{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        normal: true,
+        reason: "done"
+      }
+    end
+  end
+
   defp make_manager(tmp_dir) do
     workflow_path = Path.join(tmp_dir, "WORKFLOW.md")
 
@@ -408,6 +429,64 @@ defmodule Symphony.OrchestratorTest do
     Orchestrator.reconcile_review_issues(orchestrator, %StructTracker{parent: self()}, config)
 
     assert_received {:struct_tracker_fetch_issues_by_states, ["In Review", "Merging"]}
+  end
+
+  @tag :tmp_dir
+  test "runtime review reconciliation failure does not block active dispatch", %{tmp_dir: tmp_dir} do
+    Application.put_env(:caretta_symphony, :runner_parent, self())
+    on_exit(fn -> Application.delete_env(:caretta_symphony, :runner_parent) end)
+
+    candidate = %Issue{
+      id: "candidate",
+      identifier: "ABC-2",
+      title: "Ready candidate",
+      state: "In Progress",
+      labels: ["codex"]
+    }
+
+    review = %Issue{
+      id: "review",
+      identifier: "ABC-1",
+      title: "Review issue",
+      state: "In Review",
+      labels: ["codex"]
+    }
+
+    tracker = %{
+      fetch_issues_by_states: fn
+        ["In Review", "Merging"] -> [review]
+        _states -> []
+      end,
+      fetch_issue_states_by_ids: fn
+        ["review"] -> [review]
+        _ids -> []
+      end,
+      fetch_candidate_issues: fn -> [candidate] end,
+      list_issue_comments: fn _identifier -> [] end,
+      save_issue_state: fn _identifier, _state -> %{} end
+    }
+
+    resolver = %{evaluate: fn _issue, _opts -> raise "review provider unavailable" end}
+
+    {:ok, pid} =
+      Orchestrator.start_link(make_summary_manager(tmp_dir),
+        agent_runner: FastRunner,
+        review_resolver: resolver,
+        tracker_factory: fn _config -> tracker end
+      )
+
+    try do
+      assert_receive {:runner_called, "ABC-2", nil}, 1_000
+
+      assert eventually(fn ->
+               snapshot = Orchestrator.cached_snapshot(pid)
+
+               get_in(snapshot, ["service", "status"]) == "running" and
+                 get_in(snapshot, ["service", "last_poll_error"]) == nil
+             end)
+    after
+      Orchestrator.stop(pid)
+    end
   end
 
   @tag :tmp_dir
