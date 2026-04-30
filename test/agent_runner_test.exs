@@ -192,4 +192,56 @@ defmodule Symphony.AgentRunnerTest do
     assert File.dir?(workspace_path)
     assert_receive {:event, "1", %{"event" => "session_started"}}
   end
+
+  @tag :tmp_dir
+  test "run_issue preserves response error detail for retry health checks", %{
+    tmp_dir: tmp_dir
+  } do
+    fake_server = Path.join(tmp_dir, "fake_app_server_error.py")
+
+    File.write!(fake_server, ~S"""
+    import json
+    import sys
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        if method == "initialize":
+            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+        elif method == "initialized":
+            pass
+        elif method == "thread/start":
+            print(json.dumps({"id": msg["id"], "error": {"code": "tool_rejected", "message": "user rejected MCP tool call"}}), flush=True)
+    """)
+
+    workflow_path = Path.join(tmp_dir, "WORKFLOW.md")
+
+    File.write!(workflow_path, """
+    ---
+    tracker:
+      kind: linear
+      api_key: key
+      project_slug: demo
+    workspace:
+      root: #{Path.join(tmp_dir, "workspaces")}
+    codex:
+      command: python3 #{fake_server}
+    agent:
+      max_turns: 1
+    ---
+    Work on {{ issue.identifier }}.
+    """)
+
+    manager = ConfigManager.new(workflow_path, environ: %{})
+    {manager, _, _} = ConfigManager.load_startup(manager)
+
+    runner = AgentRunner.new(manager, %{})
+    issue = %Issue{id: "1", identifier: "ABC-1", title: "Ready", state: "In Progress"}
+
+    result = AgentRunner.run_issue(runner, issue, nil, fn _issue_id, _event -> :ok end)
+
+    assert %AgentRunResult{normal: false, reason: reason} = result
+    assert reason =~ "response_error"
+    assert reason =~ "user rejected MCP tool call"
+  end
 end

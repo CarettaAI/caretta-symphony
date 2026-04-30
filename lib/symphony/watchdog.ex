@@ -4,6 +4,10 @@ defmodule Symphony.Watchdog do
   alias Symphony.Config.{ConfigManager, ServiceConfig}
   alias Symphony.SelfHeal
   alias Symphony.Utils
+  alias Symphony.WatchdogEscalation
+  alias Symphony.WatchdogTriage
+
+  @retry_attempt_triage_threshold 3
 
   def run(manager_or_config, opts \\ [])
 
@@ -46,14 +50,19 @@ defmodule Symphony.Watchdog do
           {:ok, :healthy}
 
         {:trigger, reason} ->
-          self_heal_fun = Keyword.get(opts, :self_heal_fun, &SelfHeal.run_once/2)
+          trigger_self_heal(config, reason, opts)
 
-          self_heal_opts =
-            opts
-            |> Keyword.drop([:state, :now, :self_heal_fun])
-            |> Keyword.put(:reason, reason)
+        {:triage, payload} ->
+          triage_fun = Keyword.get(opts, :triage_fun, &WatchdogTriage.triage/3)
+          decision = triage_fun.(config, payload, Keyword.drop(opts, [:state, :now]))
 
-          {:triggered, self_heal_fun.(config, self_heal_opts)}
+          if WatchdogTriage.self_heal?(decision) do
+            trigger_self_heal(config, WatchdogTriage.reason(decision), opts, payload)
+          else
+            reason = WatchdogTriage.reason(decision)
+            escalate_watchdog_issue(config, payload, reason, "triage_rejected", opts)
+            {:ok, {:triage_rejected, reason}}
+          end
       end
     else
       {:ok, :disabled}
@@ -78,6 +87,9 @@ defmodule Symphony.Watchdog do
 
       stale_poll?(service, config.self_healing.stale_poll_ms, now) ->
         {:trigger, stale_reason(service, config.self_healing.stale_poll_ms)}
+
+      payload = retry_triage_payload(snapshot) ->
+        {:triage, payload}
 
       true ->
         :healthy
@@ -128,6 +140,10 @@ defmodule Symphony.Watchdog do
   defp log_once({:ok, :healthy}), do: :ok
   defp log_once({:ok, :disabled}), do: IO.puts("Symphony watchdog is disabled")
 
+  defp log_once({:ok, {:triage_rejected, reason}}) do
+    IO.puts("Symphony watchdog triage rejected self-heal reason=#{inspect(reason)}")
+  end
+
   defp log_once({:triggered, %SelfHeal.RunResult{} = result}) do
     IO.puts(
       "Symphony watchdog triggered self-heal status=#{result.status} reason=#{inspect(result.reason)}"
@@ -172,6 +188,131 @@ defmodule Symphony.Watchdog do
         "unknown"
 
     "Symphony poll state is stale for more than #{stale_poll_ms} ms; last observed poll timestamp=#{observed_at}"
+  end
+
+  defp retry_triage_payload(snapshot) do
+    retrying = if is_list(snapshot["retrying"]), do: snapshot["retrying"], else: []
+    candidates = Enum.filter(retrying, &retry_candidate?/1)
+
+    if candidates == [] do
+      nil
+    else
+      %{
+        "service" => snapshot["service"],
+        "counts" => snapshot["counts"],
+        "retrying" => candidates,
+        "running" => compact_issue_entries(snapshot["running"], candidates),
+        "blocked" => compact_issue_entries(snapshot["blocked"], candidates),
+        "completed" => compact_issue_entries(snapshot["completed"], candidates)
+      }
+    end
+  end
+
+  defp retry_candidate?(%{} = entry) do
+    attempt = Utils.to_int(entry["attempt"]) || 0
+    error = entry["error"] |> to_string() |> String.trim()
+
+    entry["kind"] != "continuation" and error != "" and
+      attempt >= @retry_attempt_triage_threshold
+  end
+
+  defp retry_candidate?(_entry), do: false
+
+  defp compact_issue_entries(entries, candidates) when is_list(entries) do
+    identifiers =
+      candidates
+      |> Enum.map(& &1["issue_identifier"])
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    entries
+    |> Enum.filter(fn entry ->
+      MapSet.size(identifiers) == 0 or MapSet.member?(identifiers, entry["issue_identifier"])
+    end)
+    |> Enum.map(&compact_issue_entry/1)
+    |> Enum.take(8)
+  end
+
+  defp compact_issue_entries(_entries, _candidates), do: []
+
+  defp compact_issue_entry(%{} = entry) do
+    Map.take(entry, [
+      "issue_id",
+      "issue_identifier",
+      "title",
+      "url",
+      "state",
+      "labels",
+      "assignee",
+      "reason",
+      "repo_plan",
+      "summary",
+      "activity",
+      "repo_deviations"
+    ])
+  end
+
+  defp trigger_self_heal(config, reason, opts, payload \\ %{}) do
+    self_heal_fun = Keyword.get(opts, :self_heal_fun, &SelfHeal.run_once/2)
+
+    self_heal_opts =
+      opts
+      |> Keyword.drop([:state, :now, :self_heal_fun, :triage_fun, :escalation_fun])
+      |> Keyword.put(:reason, reason)
+
+    result = self_heal_fun.(config, self_heal_opts)
+
+    if self_heal_incomplete?(result) do
+      escalate_watchdog_issue(
+        config,
+        payload,
+        self_heal_failure_reason(reason, result),
+        "self_heal_failed",
+        opts
+      )
+    end
+
+    {:triggered, result}
+  end
+
+  defp self_heal_incomplete?(%SelfHeal.RunResult{status: :ok}), do: false
+
+  defp self_heal_incomplete?(%SelfHeal.RunResult{
+         status: :skipped,
+         error: "another self-heal run is active"
+       }),
+       do: false
+
+  defp self_heal_incomplete?(%SelfHeal.RunResult{status: :skipped, error: error})
+       when error in [nil, ""],
+       do: false
+
+  defp self_heal_incomplete?(%SelfHeal.RunResult{status: status})
+       when status in [:error, :skipped],
+       do: true
+
+  defp self_heal_incomplete?(_result), do: false
+
+  defp self_heal_failure_reason(reason, %SelfHeal.RunResult{} = result) do
+    "Watchdog approved self-heal for #{reason}, but the repair did not complete: status=#{result.status} error=#{result.error || "unknown error"}"
+  end
+
+  defp escalate_watchdog_issue(config, payload, reason, source, opts) do
+    escalation_fun = Keyword.get(opts, :escalation_fun, &WatchdogEscalation.escalate/3)
+
+    escalation_opts =
+      opts
+      |> Keyword.drop([
+        :state,
+        :now,
+        :self_heal_fun,
+        :triage_fun,
+        :escalation_fun
+      ])
+      |> Keyword.put(:reason, reason)
+      |> Keyword.put(:source, source)
+
+    escalation_fun.(config, payload || %{}, escalation_opts)
   end
 
   defp age_ms(%DateTime{} = timestamp, %DateTime{} = now),

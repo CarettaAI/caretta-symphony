@@ -320,7 +320,45 @@ defmodule Symphony.RepoPlannerHttpTest do
   end
 
   @tag :tmp_dir
-  test "llm planner flags unknown repos and missing primary", %{tmp_dir: tmp_dir} do
+  test "llm planner drops unknown secondary repos when primary is active", %{tmp_dir: tmp_dir} do
+    Process.put(:repo_planner_parent, self())
+
+    Process.put(
+      :repo_planner_response,
+      Jason.encode!(%{
+        "coding_task" => true,
+        "primary_repo" => %{
+          "slug" => "ExampleOrg/desktop-runtime",
+          "reason" => "Owns the visible desktop behavior."
+        },
+        "secondary_repos" => [%{"slug" => "ExampleOrg/unknown", "reason" => "Maybe this"}],
+        "confidence" => 0.4,
+        "notes" => "Do not start in ExampleOrg/unknown."
+      })
+    )
+
+    plan =
+      RepoPlanner.plan_repositories(
+        issue("Desktop work with stale repo mention"),
+        llm_repo_config(),
+        %CodingContextConfig{},
+        %CodingClassification{is_coding_task: true, source: "rules"},
+        codex_config: %CodexConfig{command: "fake"},
+        workspace_path: tmp_dir,
+        codex_client: FakePlannerCodexClient
+      )
+
+    assert plan.primary_repo.slug == "ExampleOrg/desktop-runtime"
+    assert plan.secondary_repos == []
+    refute plan.needs_human
+    refute plan.notes =~ "ExampleOrg/unknown"
+    assert plan.notes =~ "outside the active catalog"
+  end
+
+  @tag :tmp_dir
+  test "llm planner flags unknown repos and missing primary without leaking names", %{
+    tmp_dir: tmp_dir
+  } do
     Process.put(:repo_planner_parent, self())
 
     Process.put(
@@ -328,7 +366,8 @@ defmodule Symphony.RepoPlannerHttpTest do
       Jason.encode!(%{
         "coding_task" => true,
         "secondary_repos" => [%{"slug" => "ExampleOrg/unknown", "reason" => "Maybe this"}],
-        "confidence" => 0.4
+        "confidence" => 0.4,
+        "human_reason" => "Try ExampleOrg/unknown"
       })
     )
 
@@ -345,8 +384,9 @@ defmodule Symphony.RepoPlannerHttpTest do
 
     assert plan.needs_human
     assert plan.primary_repo == nil
-    assert plan.human_reason =~ "did not return a primary repo"
-    assert plan.human_reason =~ "ExampleOrg/unknown"
+    assert plan.human_reason =~ "did not return a usable primary repo"
+    assert plan.human_reason =~ "outside the active catalog"
+    refute plan.human_reason =~ "ExampleOrg/unknown"
   end
 
   @tag :tmp_dir

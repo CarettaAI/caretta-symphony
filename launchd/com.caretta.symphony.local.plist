@@ -6,32 +6,28 @@
   <key>Label</key>
   <string>com.caretta.symphony.local</string>
 
-  <key>WorkingDirectory</key>
-  <string>/Users/omarelamin/Documents/Codex/2026-04-28/implement-symphony-according-to-the-following</string>
-
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>
-    <string>-lc</string>
-    <string>cd /Users/omarelamin/Documents/Codex/2026-04-28/implement-symphony-according-to-the-following &amp;&amp; exec ./scripts/symphony-managed.sh run</string>
+    <string>/Users/caretta/Library/Application Support/CarettaSymphony/run-symphony-tmux.sh</string>
   </array>
 
   <key>RunAtLoad</key>
   <true/>
 
-  <key>KeepAlive</key>
-  <true/>
+  <key>StartInterval</key>
+  <integer>60</integer>
 
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>/opt/homebrew/opt/erlang/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
 
   <key>StandardOutPath</key>
-  <string>/var/tmp/caretta-symphony.out.log</string>
+  <string>/var/tmp/caretta-symphony-launchd.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/var/tmp/caretta-symphony.err.log</string>
+  <string>/var/tmp/caretta-symphony-launchd.err.log</string>
 </dict>
 </plist>

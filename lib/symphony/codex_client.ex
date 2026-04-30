@@ -188,7 +188,6 @@ defmodule Symphony.CodexClient do
       :binary,
       :exit_status,
       :use_stdio,
-      :stderr_to_stdout,
       {:args, ["-lc", "exec " <> command]},
       {:cd, cwd}
     ])
@@ -438,6 +437,9 @@ defmodule Symphony.CodexClient do
       method == "item/tool/requestUserInput" ->
         auto_answer_tool_user_input(session, request_id, method, params)
 
+      method == "mcpServer/elicitation/request" ->
+        decline_mcp_elicitation(session, request_id, method, params)
+
       method == "item/tool/call" ->
         result = handle_dynamic_tool(session, params)
         send_message(session, %{"id" => request_id, "result" => result})
@@ -448,6 +450,23 @@ defmodule Symphony.CodexClient do
           "error" => %{"code" => -32601, "message" => "unsupported server request: #{method}"}
         })
     end
+  end
+
+  defp decline_mcp_elicitation(session, request_id, method, params) do
+    session =
+      send_message(session, %{
+        "id" => request_id,
+        "result" => Utils.non_interactive_mcp_elicitation_response()
+      })
+
+    emit(session, %{
+      "event" => "mcp_elicitation_declined",
+      "method" => method,
+      "payload" => params,
+      "decision" => "decline"
+    })
+
+    session
   end
 
   defp auto_answer_tool_user_input(session, request_id, method, params) do

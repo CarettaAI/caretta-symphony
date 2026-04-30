@@ -238,6 +238,9 @@ defmodule Symphony.TrackerTest do
 
         String.ends_with?(tool, "save_issue") ->
           %{"id" => arguments["id"], "state" => arguments["state"]}
+
+        String.ends_with?(tool, "list_users") ->
+          %{"users" => [%{"id" => "user-1", "displayName" => "omar", "isActive" => true}]}
       end
     end
 
@@ -253,6 +256,7 @@ defmodule Symphony.TrackerTest do
     )
 
     LinearMcpClient.save_issue_state(client, "ENG-1", "completed")
+    assert [%{"id" => "user-1"}] = LinearMcpClient.list_users(client, query: "omar")
 
     assert_received {:gateway, "linear mcp server_list_comments",
                      %{"issueId" => "ENG-1", "limit" => 250, "orderBy" => "createdAt"}}
@@ -262,6 +266,9 @@ defmodule Symphony.TrackerTest do
 
     assert_received {:gateway, "linear mcp server_save_issue",
                      %{"id" => "ENG-1", "state" => "completed"}}
+
+    assert_received {:gateway, "linear mcp server_list_users",
+                     %{"limit" => 50, "query" => "omar"}}
   end
 
   @tag :tmp_dir
@@ -288,6 +295,9 @@ defmodule Symphony.TrackerTest do
             print(json.dumps({"id": 110, "method": "item/tool/requestUserInput", "params": {"questions": [{"id": "mcp_tool_call_approval_call-1", "options": [{"label": "Approve Once"}, {"label": "Approve this Session"}, {"label": "Deny"}]}]}}), flush=True)
         elif msg.get("id") == 110:
             assert msg["result"]["answers"]["mcp_tool_call_approval_call-1"]["answers"] == ["Approve this Session"]
+            print(json.dumps({"id": 111, "method": "mcpServer/elicitation/request", "params": {"serverName": "linear", "threadId": "thr_1", "mode": "form", "message": "Need input", "requestedSchema": {"type": "object", "properties": {}}}}), flush=True)
+        elif msg.get("id") == 111:
+            assert msg["result"]["action"] == "decline"
             print(json.dumps({"id": call_request_id, "result": {"content": [{"type": "text", "text": "{\"ok\": true}"}], "isError": False}}), flush=True)
     """)
 

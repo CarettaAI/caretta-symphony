@@ -9,6 +9,7 @@ defmodule Symphony.Utils do
 
   def jsonl_read_limit_bytes, do: @jsonl_read_limit_bytes
   def non_interactive_tool_input_answer, do: @non_interactive_tool_input_answer
+  def non_interactive_mcp_elicitation_response, do: %{"action" => "decline"}
 
   def now_utc do
     DateTime.utc_now()

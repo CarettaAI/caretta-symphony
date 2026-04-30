@@ -4,7 +4,15 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
 MODE="${1:-run}"
-WORKFLOW_PATH="${SYMPHONY_WORKFLOW_PATH:-$ROOT/WORKFLOW.md}"
+WORKFLOW_PATH="${SYMPHONY_WORKFLOW_PATH:-}"
+
+if [ -z "$WORKFLOW_PATH" ]; then
+  if [ -f "$ROOT/WORKFLOW.caretta-local.md" ]; then
+    WORKFLOW_PATH="$ROOT/WORKFLOW.caretta-local.md"
+  else
+    WORKFLOW_PATH="$ROOT/WORKFLOW.md"
+  fi
+fi
 
 die() {
   printf '%s\n' "$*" >&2

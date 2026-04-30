@@ -169,6 +169,7 @@ defmodule Symphony.Models do
 
   defmodule RetryEntry do
     defstruct [
+      :issue,
       :issue_id,
       :identifier,
       :attempt,

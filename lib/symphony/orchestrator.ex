@@ -1026,6 +1026,7 @@ defmodule Symphony.Orchestrator do
     timer_ref = Process.send_after(self(), {:retry_due, issue.id}, delay_ms)
 
     entry = %RetryEntry{
+      issue: issue,
       issue_id: issue.id,
       identifier: issue.identifier,
       attempt: attempt,
@@ -1582,6 +1583,7 @@ defmodule Symphony.Orchestrator do
     due_at_monotonic = System.monotonic_time(:millisecond) + delay_ms
 
     entry = %RetryEntry{
+      issue: issue,
       issue_id: issue.id,
       identifier: issue.identifier,
       attempt: attempt,
@@ -1886,10 +1888,16 @@ defmodule Symphony.Orchestrator do
       |> Map.values()
       |> Enum.map(fn retry ->
         kind = if is_nil(retry.error), do: "continuation", else: "retry"
+        issue = retry.issue || retry_issue_from_entry(retry)
 
         %{
           "issue_id" => retry.issue_id,
           "issue_identifier" => retry.identifier,
+          "title" => issue.title,
+          "url" => issue.url,
+          "state" => issue.state,
+          "labels" => issue.labels,
+          "assignee" => issue.assignee && IssueAssignee.to_map(issue.assignee),
           "kind" => kind,
           "status" => if(kind == "continuation", do: "continuing", else: "retrying"),
           "attempt" => retry.attempt,
@@ -2071,21 +2079,23 @@ defmodule Symphony.Orchestrator do
         issue
 
       _ ->
-        %Issue{
-          id: retry.issue_id,
-          identifier: retry.identifier,
-          title: "",
-          state: "In Progress"
-        }
+        retry_issue_from_entry(retry)
     end
   rescue
     _ ->
-      %Issue{
-        id: retry.issue_id,
-        identifier: retry.identifier,
-        title: "",
-        state: "In Progress"
-      }
+      retry_issue_from_entry(retry)
+  end
+
+  defp retry_issue_from_entry(%RetryEntry{issue: %Issue{} = issue}), do: issue
+
+  defp retry_issue_from_entry(%RetryEntry{} = retry) do
+    %Issue{
+      id: retry.issue_id,
+      identifier: retry.identifier,
+      title: "",
+      state: "In Progress",
+      labels: []
+    }
   end
 
   defp evaluate_review(%ReviewPullRequestResolver{} = resolver, issue, opts),
@@ -2577,6 +2587,7 @@ defmodule Symphony.Orchestrator do
 
   defp retry_entry_to_map(entry),
     do: %{
+      "issue" => entry.issue && Issue.to_template_data(entry.issue),
       "issue_id" => entry.issue_id,
       "issue_identifier" => entry.identifier,
       "attempt" => entry.attempt,
@@ -2651,11 +2662,13 @@ defmodule Symphony.Orchestrator do
     issue_id = value["issue_id"]
     identifier = value["issue_identifier"] || value["identifier"]
     due_at_wall = Utils.parse_datetime(value["due_at"] || value["due_at_wall"])
+    issue = issue_from_map(value["issue"])
 
     if issue_id && identifier && due_at_wall do
       delay_ms = max(DateTime.diff(due_at_wall, Utils.now_utc(), :millisecond), 0)
 
       %RetryEntry{
+        issue: issue,
         issue_id: to_string(issue_id),
         identifier: to_string(identifier),
         attempt: Utils.to_int(value["attempt"]) || 1,

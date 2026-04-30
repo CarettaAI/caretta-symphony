@@ -7,25 +7,24 @@
   <string>com.caretta.symphony.watchdog</string>
 
   <key>WorkingDirectory</key>
-  <string>/Users/omarelamin/Documents/Codex/2026-04-28/implement-symphony-according-to-the-following</string>
+  <string>/Users/caretta/Documents/repos/caretta-symphony</string>
 
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>
-    <string>-lc</string>
-    <string>cd /Users/omarelamin/Documents/Codex/2026-04-28/implement-symphony-according-to-the-following &amp;&amp; exec ./scripts/symphony-managed.sh watchdog</string>
+    <string>/Users/caretta/Library/Application Support/CarettaSymphony/run-symphony-watchdog.sh</string>
   </array>
 
   <key>RunAtLoad</key>
   <true/>
 
-  <key>KeepAlive</key>
-  <true/>
+  <key>StartInterval</key>
+  <integer>60</integer>
 
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>/opt/homebrew/opt/erlang/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
 
   <key>StandardOutPath</key>

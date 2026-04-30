@@ -892,6 +892,7 @@ defmodule Symphony.OrchestratorTest do
 
     state = Orchestrator.snapshot(orchestrator)
     assert hd(state["retrying"])["kind"] == "retry"
+    assert hd(state["retrying"])["title"] == "Ready"
     assert state["counts"]["retrying"] == 1
     assert state["counts"]["continuing"] == 0
   end
