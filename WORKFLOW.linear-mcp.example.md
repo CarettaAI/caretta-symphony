@@ -6,8 +6,11 @@ tracker:
   terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
   review_states: ["In Review", "Merging"]
   handoff_state: In Review
+  rework_state: Rework
   done_state: Done
   merge_base_branch: dev
+  blocked_escalation_enabled: true
+  blocked_escalation_mentions: ["@operator"]
   required_labels: ["codex"]
   mcp_command: /Applications/Codex.app/Contents/Resources/codex app-server
   mcp_server: codex_apps
@@ -27,6 +30,31 @@ codex:
     networkAccess: true
 server:
   port: 8765
+self_healing:
+  enabled: false
+  base_branch: main
+  branch_prefix: codex/self-heal
+  workspace_root: ./.symphony-self-heal
+  stale_poll_ms: 120000
+  cooldown_ms: 900000
+  max_attempts: 3
+  validation_commands:
+    - mix format --check-formatted
+    - mix test
+    - mix escript.build
+  codex:
+    command: /Applications/Codex.app/Contents/Resources/codex app-server
+    model: gpt-5.5
+    effort: xhigh
+    approval_policy: never
+    thread_sandbox: workspace-write
+    turn_sandbox_policy:
+      type: workspaceWrite
+      networkAccess: true
+  restart:
+    tmux_session: symphony-elixir
+    port: 8765
+    workflow_path: ./WORKFLOW.md
 context:
   coding:
     enabled: true
@@ -61,12 +89,12 @@ repositories:
       local_path: /opt/symphony/example-repos/client/desktop-runtime
       remote_url: https://github.com/ExampleOrg/desktop-runtime.git
       aliases: ["desktop-runtime", "electron shell", "overlay", "live workflow", "local transcription", "runtime orchestrator"]
-      description: Desktop shell and live-session runtime; local capture, transcript batching, in-app suggestions, and host-side provider calls.
+      description: Desktop shell and live in-call runtime; local capture, transcript batching, in-app suggestions, and host-side provider calls. Do not choose this for saved-call history pages, post-call detail tabs, or follow-up email drafts unless the issue explicitly says desktop overlay or live runtime.
     - slug: ExampleOrg/web-console
       local_path: /opt/symphony/example-repos/product/web-console
       remote_url: https://github.com/ExampleOrg/web-console.git
-      aliases: ["web-console", "web app", "Next.js", "onboarding", "settings", "history", "calendar", "CRM", "in-app assistant"]
-      description: Customer-facing web console, authenticated routes, calendar/CRM settings, history views, folders, and browser-side gateway proxy.
+      aliases: ["web-console", "web app", "Next.js", "onboarding", "settings", "history", "history tab", "post-call", "saved call", "call details", "follow-up email", "email draft", "calendar", "CRM", "in-app assistant"]
+      description: Customer-facing web console, authenticated routes, calendar/CRM settings, saved-call history views, post-call detail tabs, follow-up email drafts/templates, folders, and browser-side gateway proxy.
     - slug: ExampleOrg/shared-contracts
       local_path: /opt/symphony/example-repos/libs/shared-contracts
       aliases: ["shared-contracts", "shared schema", "shared types", "API contracts"]
@@ -157,6 +185,16 @@ Symphony only releases the issue when it leaves the configured active states. Yo
 - Do not post separate completion summary comments.
 - Final assistant message should report completed actions and blockers only. Do not ask the human to do routine follow-up work.
 
+## Credentialed And Data Operations
+
+- You run under the same macOS user context as Symphony. Before declaring missing non-GitHub auth, inspect configured local auth and secret sources without printing secret values:
+  - `which supabase && supabase projects list`
+  - `which aws && aws sts get-caller-identity`
+  - local repo `.env*` files, Vercel env, AWS Secrets Manager/SSM names, Supabase project links, and connected MCP tools when relevant.
+- Never paste secret values into Linear, PRs, terminal summaries, or final messages. Load credentials into the command environment or an untracked temporary file only when required for the operation.
+- For Supabase/Postgres data migrations, a PR or migration script alone is not completion. Record dry-run output and either apply output or a concrete verified reason the data operation must not be run.
+- If the issue explicitly asks to move, copy, backfill, delete, or repair production rows or cloud resources, do not move it to `In Review` just because code was written. Move it to `In Review` only after the operation has been executed and verified, or after the requester explicitly converts the issue to a code-only preparatory task.
+
 ## State Routing
 
 - `Backlog`: out of scope. Do not modify the issue. Stop.
@@ -175,20 +213,21 @@ Symphony only releases the issue when it leaves the configured active states. Yo
    - add or refine the implementation plan,
    - mirror any issue-provided validation/test-plan items as required checklist items,
    - record a compact environment stamp with host, absolute workspace path, and short commit SHA when available.
-4. Reproduce or inspect the current behavior enough to make the fix target explicit, then implement the requested change.
+4. Reproduce or inspect the current behavior enough to make the fix target explicit, then implement the requested change. For credentialed data or cloud operations, prove the access path first using configured CLIs, local env files, or secret stores, then run the required dry-run/apply or read-only verification without exposing secrets.
 5. Run validation appropriate to the changed surface. Treat issue-provided validation instructions as mandatory.
 6. Commit and push only the Symphony-prepared branch recorded in `.symphony-workspace.json` when changes are ready. Never push an inherited source checkout branch; if the current branch differs from the expected branch, stop and report the mismatch. Open or update the PR and attach/link the PR to the Linear issue. Prefer Linear attachments/links; use the workpad only if attachments are unavailable.
 7. Before handoff, sweep existing PR feedback and checks:
    - address or explicitly respond to actionable comments,
    - confirm checks/validation are green or document a real external blocker,
    - refresh the workpad so plan, acceptance criteria, validation, commit, and PR status match reality.
-8. Move the issue to `In Review` only after the handoff bar below is satisfied. If blocked by missing non-GitHub auth, permissions, or required tooling, document the blocker in the workpad and move to `In Review` with a concise unblock note. `Done` is reserved for Symphony's merge gate after every required PR has merged into `dev`.
+8. Move the issue to `In Review` only after the handoff bar below is satisfied. If blocked by missing non-GitHub auth, permissions, or required tooling after checking the configured local CLIs/env/secret stores, document the blocker in the workpad, leave the issue active, and report the blocker in the final message. `Done` is reserved for Symphony's merge gate after every required PR has merged into `dev`.
 
 ## Handoff Bar Before `In Review`
 
 - Workpad exists and is current.
 - Implementation is complete for the issue scope.
 - Required validation/test-plan items are complete and recorded.
+- For credentialed data or cloud operations, the requested operation is executed and verified, with dry-run/apply output or read-only verification recorded. A code-only helper script is not enough unless the requester explicitly asked only for a helper script.
 - Symphony-prepared branch is pushed and PR is linked on the issue.
 - PR feedback has been swept; no known actionable comments remain unaddressed.
 - PR checks are passing, or any failure is documented as an external blocker that cannot be resolved in-session.

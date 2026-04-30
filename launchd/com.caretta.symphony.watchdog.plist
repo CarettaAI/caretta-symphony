@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.caretta.symphony.watchdog</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/caretta/Documents/repos/caretta-symphony</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/caretta/Library/Application Support/CarettaSymphony/run-symphony-watchdog.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/opt/erlang/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/var/tmp/caretta-symphony-watchdog.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/var/tmp/caretta-symphony-watchdog.err.log</string>
+</dict>
+</plist>
