@@ -810,43 +810,151 @@ defmodule Symphony.Orchestrator do
     mention = blocked_escalation_mention(blocked.issue, config)
     mention_line = if mention, do: "#{mention} ", else: ""
 
-    repo_plan =
-      case blocked.repo_plan do
-        %RepoPlan{} = plan ->
-          """
-          Repo plan:
-          - Primary repo: #{plan.primary_repo && plan.primary_repo.slug}
-          - Needs human: #{plan.needs_human}
-          - Human reason: #{plan.human_reason || "n/a"}
-          - Notes: #{plan.notes || "n/a"}
-          """
-
-        _ ->
-          "Repo plan: n/a"
-      end
-
     workspace =
       if blocked.workspace_path,
-        do: "Workspace: `#{blocked.workspace_path}`",
-        else: "Workspace: n/a"
+        do: "the workspace is `#{blocked.workspace_path}`",
+        else: "there is no recorded workspace path"
+
+    diagnosis = blocked_diagnosis_prose(blocked)
 
     """
     #{@blocked_escalation_header}
 
-    #{mention_line}Symphony is blocked and could not resolve this autonomously.
+    #{mention_line}Symphony could not finish this issue cleanly yet.
 
-    Reason:
-    #{blocked.reason}
+    #{diagnosis}
 
-    #{workspace}
+    For context, #{workspace}. #{repo_plan_context(blocked.repo_plan)}
 
-    #{String.trim(repo_plan)}
+    Symphony's internal reason was `#{blocked.reason}`.
+    """
+    |> String.trim()
+  end
 
-    Next step:
+  defp blocked_diagnosis_prose(%BlockedEntry{diagnosis: diagnosis, reason: reason})
+       when is_map(diagnosis) do
+    summary = Utils.map_get(diagnosis, "summary") || reason
+    fault_domain = Utils.map_get(diagnosis, "fault_domain") || "unknown"
+    raw_failure = Utils.map_get(diagnosis, "raw_failure")
+    operator_hint = Utils.map_get(diagnosis, "operator_hint")
+    handoff = Utils.map_get(diagnosis, "agent_handoff_excerpt")
+    next_action = blocked_diagnosis_next_action(diagnosis)
+
+    evidence =
+      diagnosis
+      |> Utils.map_get("evidence", [])
+      |> evidence_sentence()
+
+    [
+      "#{summary} The likely owner area is `#{fault_domain}`.",
+      evidence,
+      raw_failure_sentence(raw_failure),
+      next_action_sentence(next_action),
+      operator_hint_sentence(operator_hint),
+      handoff_section(handoff)
+    ]
+    |> Enum.reject(&blank?/1)
+    |> Enum.join("\n\n")
+  end
+
+  defp blocked_diagnosis_prose(%BlockedEntry{reason: reason}) do
+    """
+    The only stored reason is `#{reason}`, so Symphony does not have a deeper diagnosis for this block yet.
+
     Add the missing decision, repository mapping, credential, approval, or blocker resolution in this issue. After a human reply, Symphony will release the block and retry the issue on the next poll.
     """
     |> String.trim()
   end
+
+  defp blocked_diagnosis_next_action(diagnosis) when is_map(diagnosis) do
+    diagnosis
+    |> Utils.map_get("next_action")
+    |> case do
+      value when is_binary(value) ->
+        value |> String.trim() |> Utils.truncate(1_500)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp blocked_diagnosis_next_action(_), do: nil
+
+  defp evidence_sentence(evidence) when is_list(evidence) do
+    points =
+      evidence
+      |> Enum.map(&(to_string(&1) |> String.trim()))
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.take(4)
+
+    case points do
+      [] -> nil
+      [one] -> "What points to that: #{one}"
+      many -> "What points to that: #{Enum.join(many, " ")}"
+    end
+  end
+
+  defp evidence_sentence(_), do: nil
+
+  defp raw_failure_sentence(value) when value in [nil, ""], do: nil
+
+  defp raw_failure_sentence(value) do
+    text = value |> to_string() |> String.trim()
+    if text == "", do: nil, else: "The concrete failure was: #{Utils.truncate(text, 1_000)}"
+  end
+
+  defp next_action_sentence(value) when value in [nil, ""], do: nil
+
+  defp next_action_sentence(value) do
+    text = value |> to_string() |> String.trim()
+    if text == "", do: nil, else: "The practical fix is: #{Utils.truncate(text, 1_500)}"
+  end
+
+  defp operator_hint_sentence(value) when value in [nil, ""], do: nil
+
+  defp operator_hint_sentence(value) do
+    text = value |> to_string() |> String.trim()
+    if text == "", do: nil, else: "Helpful hint: #{Utils.truncate(text, 1_000)}"
+  end
+
+  defp handoff_section(nil), do: nil
+  defp handoff_section(""), do: nil
+
+  defp handoff_section(text) do
+    safe =
+      text
+      |> to_string()
+      |> Utils.truncate(2_500)
+      |> String.replace("```", "'''")
+
+    """
+    The agent's last handoff was:
+    ```text
+    #{safe}
+    ```
+    """
+    |> String.trim()
+  end
+
+  defp repo_plan_context(%RepoPlan{} = plan) do
+    primary = plan.primary_repo && plan.primary_repo.slug
+    secondary = Enum.map(plan.secondary_repos, & &1.slug)
+
+    repos =
+      [primary | secondary]
+      |> Enum.reject(&blank?/1)
+      |> Enum.join(", ")
+
+    notes = if blank?(plan.notes), do: nil, else: " Notes from planning: #{plan.notes}"
+
+    if blank?(repos) do
+      "There was no repository plan attached.#{notes}"
+    else
+      "Symphony was working in #{repos}.#{notes}"
+    end
+  end
+
+  defp repo_plan_context(_), do: "There was no repository plan attached."
 
   defp blocked_escalation_mention(%Issue{} = issue, %ServiceConfig{} = config) do
     issue_assignee_mention(issue) || fallback_blocked_escalation_mention(config)
@@ -1026,6 +1134,7 @@ defmodule Symphony.Orchestrator do
     timer_ref = Process.send_after(self(), {:retry_due, issue.id}, delay_ms)
 
     entry = %RetryEntry{
+      issue: issue,
       issue_id: issue.id,
       identifier: issue.identifier,
       attempt: attempt,
@@ -1582,6 +1691,7 @@ defmodule Symphony.Orchestrator do
     due_at_monotonic = System.monotonic_time(:millisecond) + delay_ms
 
     entry = %RetryEntry{
+      issue: issue,
       issue_id: issue.id,
       identifier: issue.identifier,
       attempt: attempt,
@@ -1690,6 +1800,7 @@ defmodule Symphony.Orchestrator do
                 do: result.repo_plan.human_reason,
                 else: result.reason
               ),
+            diagnosis: result.blocker_diagnosis,
             blocked_at: Utils.now_utc(),
             workspace_path: entry.workspace_path,
             repo_plan: result.repo_plan
@@ -1886,10 +1997,16 @@ defmodule Symphony.Orchestrator do
       |> Map.values()
       |> Enum.map(fn retry ->
         kind = if is_nil(retry.error), do: "continuation", else: "retry"
+        issue = retry.issue || retry_issue_from_entry(retry)
 
         %{
           "issue_id" => retry.issue_id,
           "issue_identifier" => retry.identifier,
+          "title" => issue.title,
+          "url" => issue.url,
+          "state" => issue.state,
+          "labels" => issue.labels,
+          "assignee" => issue.assignee && IssueAssignee.to_map(issue.assignee),
           "kind" => kind,
           "status" => if(kind == "continuation", do: "continuing", else: "retrying"),
           "attempt" => retry.attempt,
@@ -1915,6 +2032,7 @@ defmodule Symphony.Orchestrator do
           "labels" => blocked.issue.labels,
           "blocked_at" => Utils.isoformat_z(blocked.blocked_at),
           "reason" => blocked.reason,
+          "diagnosis" => blocked.diagnosis,
           "escalation" => blocked_escalation_to_public_map(blocked),
           "workspace" => %{"path" => blocked.workspace_path && to_string(blocked.workspace_path)},
           "repo_plan" => blocked.repo_plan && RepoPlan.to_map(blocked.repo_plan)
@@ -2071,21 +2189,23 @@ defmodule Symphony.Orchestrator do
         issue
 
       _ ->
-        %Issue{
-          id: retry.issue_id,
-          identifier: retry.identifier,
-          title: "",
-          state: "In Progress"
-        }
+        retry_issue_from_entry(retry)
     end
   rescue
     _ ->
-      %Issue{
-        id: retry.issue_id,
-        identifier: retry.identifier,
-        title: "",
-        state: "In Progress"
-      }
+      retry_issue_from_entry(retry)
+  end
+
+  defp retry_issue_from_entry(%RetryEntry{issue: %Issue{} = issue}), do: issue
+
+  defp retry_issue_from_entry(%RetryEntry{} = retry) do
+    %Issue{
+      id: retry.issue_id,
+      identifier: retry.identifier,
+      title: "",
+      state: "In Progress",
+      labels: []
+    }
   end
 
   defp evaluate_review(%ReviewPullRequestResolver{} = resolver, issue, opts),
@@ -2577,6 +2697,7 @@ defmodule Symphony.Orchestrator do
 
   defp retry_entry_to_map(entry),
     do: %{
+      "issue" => entry.issue && Issue.to_template_data(entry.issue),
       "issue_id" => entry.issue_id,
       "issue_identifier" => entry.identifier,
       "attempt" => entry.attempt,
@@ -2596,6 +2717,7 @@ defmodule Symphony.Orchestrator do
     do: %{
       "issue" => Issue.to_template_data(entry.issue),
       "reason" => entry.reason,
+      "diagnosis" => entry.diagnosis,
       "blocked_at" => Utils.isoformat_z(entry.blocked_at),
       "workspace_path" => entry.workspace_path && to_string(entry.workspace_path),
       "repo_plan" => entry.repo_plan && RepoPlan.to_map(entry.repo_plan),
@@ -2651,11 +2773,13 @@ defmodule Symphony.Orchestrator do
     issue_id = value["issue_id"]
     identifier = value["issue_identifier"] || value["identifier"]
     due_at_wall = Utils.parse_datetime(value["due_at"] || value["due_at_wall"])
+    issue = issue_from_map(value["issue"])
 
     if issue_id && identifier && due_at_wall do
       delay_ms = max(DateTime.diff(due_at_wall, Utils.now_utc(), :millisecond), 0)
 
       %RetryEntry{
+        issue: issue,
         issue_id: to_string(issue_id),
         identifier: to_string(identifier),
         attempt: Utils.to_int(value["attempt"]) || 1,
@@ -2693,6 +2817,7 @@ defmodule Symphony.Orchestrator do
       %BlockedEntry{
         issue: issue,
         reason: to_string(value["reason"] || ""),
+        diagnosis: if(is_map(value["diagnosis"]), do: value["diagnosis"]),
         blocked_at: blocked_at,
         workspace_path: value["workspace_path"],
         repo_plan: if(is_map(value["repo_plan"]), do: repo_plan_from_map(value["repo_plan"])),

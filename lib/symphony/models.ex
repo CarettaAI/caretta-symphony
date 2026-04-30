@@ -169,6 +169,7 @@ defmodule Symphony.Models do
 
   defmodule RetryEntry do
     defstruct [
+      :issue,
       :issue_id,
       :identifier,
       :attempt,
@@ -200,6 +201,7 @@ defmodule Symphony.Models do
   defmodule BlockedEntry do
     defstruct issue: nil,
               reason: nil,
+              diagnosis: nil,
               blocked_at: nil,
               workspace_path: nil,
               repo_plan: nil,

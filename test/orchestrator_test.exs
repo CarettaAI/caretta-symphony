@@ -468,6 +468,76 @@ defmodule Symphony.OrchestratorTest do
   end
 
   @tag :tmp_dir
+  test "blocked worker escalations include structured diagnosis", %{tmp_dir: tmp_dir} do
+    parent = self()
+
+    tracker = %{
+      list_issue_comments: fn "ABC-1" -> [] end,
+      save_issue_comment: fn "ABC-1", body, opts ->
+        send(parent, {:save_comment, body, opts})
+        %{"id" => "comment-1"}
+      end
+    }
+
+    orchestrator =
+      make_manager(tmp_dir)
+      |> Orchestrator.new()
+      |> Map.put(:tracker_factory, fn _ -> tracker end)
+
+    issue = %Issue{
+      id: "1",
+      identifier: "ABC-1",
+      title: "Ready",
+      state: "In Progress",
+      labels: ["codex"]
+    }
+
+    entry = %RunningEntry{
+      issue: issue,
+      workspace_path: tmp_dir,
+      started_at: Utils.now_utc(),
+      started_monotonic: System.monotonic_time(:millisecond)
+    }
+
+    orchestrator = put_in(orchestrator.state.running[issue.id], entry)
+
+    diagnosis = %{
+      "summary" =>
+        "Linear writes are rejected inside the Codex agent, and validation is blocked by missing GitHub Packages npm auth.",
+      "fault_domain" => "credentials",
+      "raw_failure" => "401 Unauthorized for @CarettaAI/project-n-lambdas",
+      "evidence" => [
+        "Agent reported Linear read works but write mutations are rejected.",
+        "Repo has package.json but no repo-level `.npmrc`."
+      ],
+      "next_action" =>
+        "Fix Codex Linear MCP write config and add repo/user `.npmrc` auth for @CarettaAI packages.",
+      "operator_hint" =>
+        "Compare Codex app Linear MCP config with the Symphony tracker config; npm needs @CarettaAI registry auth.",
+      "agent_handoff_excerpt" =>
+        "Linear mutation calls are rejected. npm ci failed with 401 Unauthorized."
+    }
+
+    Orchestrator.handle_worker_done(orchestrator, issue.id, %AgentRunResult{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      blocked: true,
+      reason: "unresolved_external_blocker",
+      blocker_diagnosis: diagnosis
+    })
+
+    assert_received {:save_comment, body, []}
+    assert body =~ "Symphony could not finish this issue cleanly yet"
+    assert body =~ "unresolved_external_blocker"
+    assert body =~ "Linear writes are rejected"
+    assert body =~ "likely owner area is `credentials`"
+    assert body =~ "401 Unauthorized for @CarettaAI/project-n-lambdas"
+    assert body =~ "no repo-level `.npmrc`"
+    assert body =~ "Fix Codex Linear MCP write config"
+    assert body =~ "agent's last handoff"
+  end
+
+  @tag :tmp_dir
   test "review reconciliation moves done only after all PRs merged", %{tmp_dir: tmp_dir} do
     parent = self()
 
@@ -892,6 +962,7 @@ defmodule Symphony.OrchestratorTest do
 
     state = Orchestrator.snapshot(orchestrator)
     assert hd(state["retrying"])["kind"] == "retry"
+    assert hd(state["retrying"])["title"] == "Ready"
     assert state["counts"]["retrying"] == 1
     assert state["counts"]["continuing"] == 0
   end

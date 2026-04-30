@@ -7,6 +7,9 @@ defmodule Symphony.SelfHeal do
   alias Symphony.Config.{ConfigManager, ServiceConfig, SelfHealingConfig}
   alias Symphony.Utils
 
+  @restart_port_release_timeout_seconds 10
+  @restart_port_probe_interval_seconds "0.1"
+
   defmodule CommandResult do
     defstruct command: nil, cwd: nil, output: "", status: 0
   end
@@ -92,15 +95,13 @@ defmodule Symphony.SelfHeal do
       commands = [
         "tmux has-session -t #{shell(session)} 2>/dev/null && tmux kill-session -t #{shell(session)} || true",
         "pids=$(lsof -tiTCP:#{port} -sTCP:LISTEN 2>/dev/null || true); if [ -n \"$pids\" ]; then kill $pids 2>/dev/null || true; fi",
+        wait_for_port_release_command(port),
         "tmux new-session -d -s #{shell(session)} #{shell(managed_command)}"
       ]
 
-      results = Enum.map(commands, &run_shell(&1, repo_root, opts))
-
-      if Enum.all?(results, &(&1.status == 0)) do
-        {:ok, results}
-      else
-        {:error, results}
+      case run_restart_commands(commands, repo_root, opts) do
+        {:ok, results} -> {:ok, results}
+        {:error, results} -> {:error, results}
       end
     else
       {:error,
@@ -485,6 +486,28 @@ defmodule Symphony.SelfHeal do
       result = run_shell(command, cwd, opts)
       if result.status == 0, do: {:cont, {:ok, acc ++ [result]}}, else: {:halt, {:error, result}}
     end)
+  end
+
+  defp run_restart_commands(commands, cwd, opts) do
+    Enum.reduce_while(commands, {:ok, []}, fn command, {:ok, acc} ->
+      result = run_shell(command, cwd, opts)
+      results = acc ++ [result]
+
+      if result.status == 0,
+        do: {:cont, {:ok, results}},
+        else: {:halt, {:error, results}}
+    end)
+  end
+
+  defp wait_for_port_release_command(port) do
+    "deadline=$((SECONDS + #{@restart_port_release_timeout_seconds})); " <>
+      "while pids=$(lsof -tiTCP:#{port} -sTCP:LISTEN 2>/dev/null) && [ -n \"$pids\" ]; do " <>
+      "if [ \"$SECONDS\" -ge \"$deadline\" ]; then " <>
+      "printf '%s\\n' \"timed out waiting for TCP port #{port} to be released by pids: $pids\" >&2; " <>
+      "exit 75; " <>
+      "fi; " <>
+      "sleep #{@restart_port_probe_interval_seconds}; " <>
+      "done"
   end
 
   defp run_shell(command, cwd, opts) do

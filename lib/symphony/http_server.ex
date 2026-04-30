@@ -1,6 +1,7 @@
 defmodule Symphony.HTTPServer do
   @moduledoc false
 
+  alias Symphony.Error
   alias Symphony.Orchestrator
   alias Symphony.Utils
 
@@ -17,12 +18,35 @@ defmodule Symphony.HTTPServer do
   def start(orchestrator, opts \\ []) do
     host = Keyword.get(opts, :host, "127.0.0.1")
     port = Keyword.get(opts, :port, 0)
-    {:ok, ip} = host |> to_charlist() |> :inet.parse_address()
+    ip = parse_bind_host!(host)
 
-    {:ok, socket} =
-      :gen_tcp.listen(port, [:binary, packet: :raw, active: false, reuseaddr: true, ip: ip])
+    socket =
+      case :gen_tcp.listen(port, [:binary, packet: :raw, active: false, reuseaddr: true, ip: ip]) do
+        {:ok, socket} ->
+          socket
 
-    {:ok, bound_port} = :inet.port(socket)
+        {:error, reason} ->
+          raise Error,
+            code: :http_server_bind_failed,
+            message:
+              "failed to bind Symphony HTTP server on #{host}:#{port}: #{format_inet_error(reason)}",
+            cause: reason
+      end
+
+    bound_port =
+      case :inet.port(socket) do
+        {:ok, bound_port} ->
+          bound_port
+
+        {:error, reason} ->
+          :gen_tcp.close(socket)
+
+          raise Error,
+            code: :http_server_bind_failed,
+            message:
+              "failed to read Symphony HTTP server port for #{host}:#{port}: #{format_inet_error(reason)}",
+            cause: reason
+      end
 
     server = %__MODULE__{
       orchestrator: orchestrator,
@@ -35,6 +59,23 @@ defmodule Symphony.HTTPServer do
     acceptor = spawn_link(fn -> accept_loop(server) end)
     %{server | acceptor: acceptor}
   end
+
+  defp parse_bind_host!(host) do
+    case host |> to_charlist() |> :inet.parse_address() do
+      {:ok, ip} ->
+        ip
+
+      {:error, reason} ->
+        raise Error,
+          code: :http_server_bind_failed,
+          message:
+            "failed to parse Symphony HTTP bind host #{inspect(host)}: #{format_inet_error(reason)}",
+          cause: reason
+    end
+  end
+
+  defp format_inet_error(reason) when is_atom(reason), do: ":#{reason}"
+  defp format_inet_error(reason), do: inspect(reason)
 
   def stop(%__MODULE__{} = server) do
     if server.acceptor, do: Process.exit(server.acceptor, :normal)

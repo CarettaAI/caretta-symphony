@@ -65,13 +65,61 @@ defmodule Symphony.SelfHealTest do
     assert {:ok, results} =
              SelfHeal.restart_managed(config, artifact_path: artifact_path, runner: runner)
 
-    assert length(results) == 3
+    assert length(results) == 4
     assert_received {:command, "tmux has-session" <> _, ^tmp_dir}
     assert_received {:command, "pids=$(lsof" <> _, ^tmp_dir}
+    assert_received {:command, "deadline=$((SECONDS" <> wait_command, ^tmp_dir}
+    assert wait_command =~ "TCP port 9999"
     assert_received {:command, "tmux new-session" <> command, ^tmp_dir}
     assert command =~ "symphony-test"
     assert command =~ artifact_path
     assert command =~ workflow_path
+  end
+
+  @tag :tmp_dir
+  test "restart_managed does not start replacement before listener release", %{tmp_dir: tmp_dir} do
+    workflow_path = Path.join(tmp_dir, "WORKFLOW.md")
+    File.write!(workflow_path, "body")
+    artifact_path = Path.join(tmp_dir, "symphony")
+    File.write!(artifact_path, "#!/bin/sh\n")
+    File.chmod!(artifact_path, 0o755)
+
+    config =
+      service_config(tmp_dir,
+        self_healing: %SelfHealingConfig{
+          enabled: true,
+          workspace_root: Path.join(tmp_dir, "heal"),
+          tmux_session: "symphony-test",
+          restart_port: 9999,
+          restart_workflow_path: workflow_path
+        }
+      )
+
+    test_pid = self()
+
+    runner = fn command, cwd, _env ->
+      send(test_pid, {:command, command, cwd})
+
+      if String.starts_with?(command, "deadline=$((SECONDS") do
+        %CommandResult{
+          command: command,
+          cwd: cwd,
+          status: 75,
+          output: "timed out waiting for TCP port 9999"
+        }
+      else
+        %CommandResult{command: command, cwd: cwd, status: 0, output: ""}
+      end
+    end
+
+    assert {:error, results} =
+             SelfHeal.restart_managed(config, artifact_path: artifact_path, runner: runner)
+
+    assert Enum.map(results, & &1.status) == [0, 0, 75]
+    assert_received {:command, "tmux has-session" <> _, ^tmp_dir}
+    assert_received {:command, "pids=$(lsof" <> _, ^tmp_dir}
+    assert_received {:command, "deadline=$((SECONDS" <> _, ^tmp_dir}
+    refute_received {:command, "tmux new-session" <> _, ^tmp_dir}
   end
 
   @tag :tmp_dir

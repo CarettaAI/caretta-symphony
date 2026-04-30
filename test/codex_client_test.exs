@@ -152,6 +152,57 @@ defmodule Symphony.CodexClientTest do
   end
 
   @tag :tmp_dir
+  test "Codex JSONL client keeps stderr diagnostics out of protocol and declines MCP elicitation",
+       %{tmp_dir: tmp_dir} do
+    fake_server = Path.join(tmp_dir, "fake_app_server.py")
+
+    File.write!(fake_server, ~S"""
+    import json
+    import sys
+
+    thread_id = "thr_elicitation"
+    turn_id = "turn_elicitation"
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        if method == "initialize":
+            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+        elif method == "initialized":
+            pass
+        elif method == "thread/start":
+            print(json.dumps({"id": msg["id"], "result": {"thread": {"id": thread_id}}}), flush=True)
+        elif method == "turn/start":
+            print(json.dumps({"id": msg["id"], "result": {"turn": {"id": turn_id}}}), flush=True)
+            print("diagnostic from app-server stderr", file=sys.stderr, flush=True)
+            print(json.dumps({"id": 113, "method": "mcpServer/elicitation/request", "params": {"serverName": "linear", "threadId": thread_id, "turnId": turn_id, "mode": "form", "message": "Need more input", "requestedSchema": {"type": "object", "properties": {}}}}), flush=True)
+        elif msg.get("id") == 113:
+            assert msg["result"]["action"] == "decline"
+            assert "content" not in msg["result"]
+            print(json.dumps({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed"}}}), flush=True)
+    """)
+
+    parent = self()
+
+    session =
+      CodexClient.start_session(%CodexConfig{command: "python3 #{fake_server}"}, tmp_dir,
+        tracker_config: nil,
+        on_event: fn event -> send(parent, {:event, event}) end
+      )
+
+    {result, session} = CodexClient.run_turn(session, "call")
+    CodexClient.stop_session(session)
+
+    assert result.status == "completed"
+    assert_receive {:event, %{"event" => "mcp_elicitation_declined", "decision" => "decline"}}
+
+    stderr_log =
+      Path.join([tmp_dir, ".symphony-self-heal", "logs", "codex-app-server.stderr.log"])
+
+    assert File.read!(stderr_log) =~ "diagnostic from app-server stderr"
+  end
+
+  @tag :tmp_dir
   test "Codex JSONL client cleans up when start times out", %{tmp_dir: tmp_dir} do
     marker = Path.join(tmp_dir, "pid.txt")
     fake_server = Path.join(tmp_dir, "fake_hanging_app_server.py")

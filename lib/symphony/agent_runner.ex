@@ -1,6 +1,7 @@
 defmodule Symphony.AgentRunner do
   @moduledoc false
 
+  alias Symphony.BlockerDiagnosis
   alias Symphony.CodexClient
   alias Symphony.CodingContext
   alias Symphony.Config.ConfigManager
@@ -20,7 +21,9 @@ defmodule Symphony.AgentRunner do
               retryable: true,
               blocked: false,
               workspace_path: nil,
-              repo_plan: nil
+              repo_plan: nil,
+              blocker_diagnosis: nil,
+              agent_message_text: nil
   end
 
   def agent_reported_linear_delivery_blocker?(text) do
@@ -319,18 +322,21 @@ defmodule Symphony.AgentRunner do
           on_event: emit
         )
 
-      try do
-        run_turn_loop(session, tracker, issue, first_prompt, config, workspace.path, repo_plan)
-      after
-        CodexClient.stop_session(session)
-      end
+      result =
+        try do
+          run_turn_loop(session, tracker, issue, first_prompt, config, workspace.path, repo_plan)
+        after
+          CodexClient.stop_session(session)
+        end
+
+      attach_blocker_diagnosis(result, config, issue)
     rescue
       error in Symphony.Error ->
         %AgentRunResult{
           issue_id: issue.id,
           issue_identifier: issue.identifier,
           normal: false,
-          reason: to_string(error.code),
+          reason: error_reason(error),
           workspace_path: workspace.path
         }
 
@@ -357,6 +363,12 @@ defmodule Symphony.AgentRunner do
     after
       WorkspaceManager.after_run(workspace_manager, workspace.path)
     end
+  end
+
+  defp error_reason(%Symphony.Error{} = error) do
+    error
+    |> Exception.message()
+    |> Utils.truncate(1000)
   end
 
   defp run_turn_loop(session, tracker, issue, first_prompt, config, workspace_path, repo_plan) do
@@ -399,7 +411,8 @@ defmodule Symphony.AgentRunner do
              retryable: false,
              blocked: true,
              workspace_path: workspace_path,
-             repo_plan: repo_plan
+             repo_plan: repo_plan,
+             agent_message_text: turn_result.agent_message_text
            }}
 
         agent_reported_unresolved_external_blocker?(turn_result.agent_message_text) ->
@@ -412,7 +425,8 @@ defmodule Symphony.AgentRunner do
              retryable: false,
              blocked: true,
              workspace_path: workspace_path,
-             repo_plan: repo_plan
+             repo_plan: repo_plan,
+             agent_message_text: turn_result.agent_message_text
            }}
 
         !MapSet.member?(TrackerConfig.active_state_set(config.tracker), state) ->
@@ -457,6 +471,24 @@ defmodule Symphony.AgentRunner do
         result
     end
   end
+
+  defp attach_blocker_diagnosis(%AgentRunResult{blocked: true} = result, config, issue) do
+    diagnosis =
+      BlockerDiagnosis.diagnose(
+        config,
+        issue,
+        result.reason,
+        result.agent_message_text,
+        result.workspace_path,
+        result.repo_plan
+      )
+
+    %{result | blocker_diagnosis: diagnosis}
+  rescue
+    _ -> result
+  end
+
+  defp attach_blocker_diagnosis(%AgentRunResult{} = result, _config, _issue), do: result
 
   def try_delivery_fallback(tracker, %Issue{} = issue, agent_message_text, opts) do
     if agent_reported_linear_delivery_blocker?(agent_message_text) and

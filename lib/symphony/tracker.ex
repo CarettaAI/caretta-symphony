@@ -265,6 +265,7 @@ defmodule Symphony.Tracker do
     @linear_mcp_tool_list_comments "linear mcp server_list_comments"
     @linear_mcp_tool_save_comment "linear mcp server_save_comment"
     @linear_mcp_tool_save_issue "linear mcp server_save_issue"
+    @linear_mcp_tool_list_users "linear mcp server_list_users"
 
     defstruct config: nil, gateway: nil
 
@@ -351,6 +352,31 @@ defmodule Symphony.Tracker do
           )
 
       response
+    end
+
+    def list_users(%__MODULE__{} = client, opts \\ []) do
+      args =
+        %{"limit" => min(Keyword.get(opts, :limit, 50), 250)}
+        |> put_if("team", client.config.team)
+        |> put_if("query", Keyword.get(opts, :query))
+
+      body = call_gateway(client, @linear_mcp_tool_list_users, args)
+
+      cond do
+        is_list(body) ->
+          Enum.filter(body, &is_map/1)
+
+        is_map(body) and is_list(body["users"]) ->
+          Enum.filter(body["users"], &is_map/1)
+
+        is_map(body) and is_list(body["nodes"]) ->
+          Enum.filter(body["nodes"], &is_map/1)
+
+        true ->
+          raise Error,
+            code: :linear_unknown_payload,
+            message: "Linear MCP users payload missing users list"
+      end
     end
 
     defp list_issues(client, state: state), do: list_issues_page(client, state, nil, [])
@@ -659,6 +685,12 @@ defmodule Symphony.Tracker do
               "error" => %{"code" => -32601, "message" => "unsupported server request: #{method}"}
             })
           end
+
+        method == "mcpServer/elicitation/request" ->
+          send_message(gateway, %{
+            "id" => request_id,
+            "result" => Utils.non_interactive_mcp_elicitation_response()
+          })
 
         true ->
           send_message(gateway, %{
