@@ -38,6 +38,17 @@ defmodule Symphony.Review do
     def reason(_), do: "no required PRs were found"
   end
 
+  defmodule ReviewFeedbackItem do
+    defstruct source: nil,
+              id: nil,
+              author: nil,
+              author_type: nil,
+              body: "",
+              url: nil,
+              created_at: nil,
+              updated_at: nil
+  end
+
   defmodule GhPullRequestInspector do
     alias Symphony.Review
     alias Symphony.Review.PullRequestRef
@@ -90,6 +101,27 @@ defmodule Symphony.Review do
         else: []
     end
 
+    def list_pr_feedback(%PullRequestRef{} = ref) do
+      repo = PullRequestRef.repo_full_name(ref)
+      number = ref.number
+
+      [
+        {"github_pr_comment", "/repos/#{repo}/issues/#{number}/comments"},
+        {"github_pr_review", "/repos/#{repo}/pulls/#{number}/reviews"},
+        {"github_pr_review_comment", "/repos/#{repo}/pulls/#{number}/comments"}
+      ]
+      |> Enum.flat_map(fn {source, endpoint} ->
+        endpoint
+        |> run_gh_pages()
+        |> Enum.flat_map(fn payload ->
+          case Review.pr_feedback_item_from_payload(ref, source, payload) do
+            nil -> []
+            item -> [item]
+          end
+        end)
+      end)
+    end
+
     defp run_gh_json(args) do
       case System.cmd("gh", args, stderr_to_stdout: true) do
         {body, 0} -> Jason.decode!(body)
@@ -98,6 +130,37 @@ defmodule Symphony.Review do
     rescue
       _ -> nil
     end
+
+    defp run_gh_pages(endpoint) do
+      case System.cmd(
+             "gh",
+             [
+               "api",
+               "--method",
+               "GET",
+               "--paginate",
+               "--slurp",
+               endpoint,
+               "-F",
+               "per_page=100"
+             ],
+             stderr_to_stdout: true
+           ) do
+        {body, 0} ->
+          body |> Jason.decode!() |> flatten_slurped_pages()
+
+        _ ->
+          []
+      end
+    rescue
+      _ -> []
+    end
+
+    defp flatten_slurped_pages(pages) when is_list(pages) do
+      if Enum.all?(pages, &is_list/1), do: List.flatten(pages), else: pages
+    end
+
+    defp flatten_slurped_pages(_), do: []
   end
 
   defmodule ReviewPullRequestResolver do
@@ -161,6 +224,20 @@ defmodule Symphony.Review do
       }
     end
 
+    def feedback_snapshot(%__MODULE__{} = resolver, comments, prs) do
+      pr_feedback =
+        prs
+        |> Enum.flat_map(fn
+          %{ref: %PullRequestRef{} = ref} ->
+            maybe_call_inspector(resolver.inspector, :list_pr_feedback, [ref], [])
+
+          _ ->
+            []
+        end)
+
+      Review.feedback_snapshot(comments, pr_feedback)
+    end
+
     defp resolve_dependencies(resolver, queue, required, unresolved) do
       do_resolve_dependencies(resolver, queue, required, unresolved, 0)
     end
@@ -209,6 +286,28 @@ defmodule Symphony.Review do
     end
 
     defp call_inspector(inspector, function, args), do: apply(inspector, function, args)
+
+    defp maybe_call_inspector(inspector, function, args, default) when is_atom(inspector) do
+      if function_exported?(inspector, function, length(args)),
+        do: apply(inspector, function, args),
+        else: default
+    rescue
+      _ -> default
+    end
+
+    defp maybe_call_inspector(inspector, function, args, default) when is_map(inspector) do
+      if Map.has_key?(inspector, function),
+        do: apply(Map.fetch!(inspector, function), args),
+        else: default
+    rescue
+      _ -> default
+    end
+
+    defp maybe_call_inspector(inspector, function, args, default) do
+      apply(inspector, function, args)
+    rescue
+      _ -> default
+    end
   end
 
   def issue_attachment_pr_urls(%Issue{} = issue) do
@@ -229,6 +328,145 @@ defmodule Symphony.Review do
       else
         []
       end
+    end)
+  end
+
+  def feedback_snapshot(linear_comments, pr_feedback_items \\ []) do
+    items =
+      (linear_feedback_items(linear_comments) ++ normalize_feedback_items(pr_feedback_items))
+      |> human_feedback_items()
+      |> dedupe_feedback_items()
+
+    %{
+      items: items,
+      fingerprint: feedback_fingerprint(items),
+      latest_feedback_at: latest_feedback_at(items)
+    }
+  end
+
+  def linear_feedback_items(comments) do
+    comments
+    |> Enum.flat_map(fn comment ->
+      case linear_feedback_item(comment) do
+        nil -> []
+        item -> [item]
+      end
+    end)
+  end
+
+  def linear_feedback_item(comment) when is_map(comment) do
+    body = comment_value(comment, "body") || comment_value(comment, "text") || ""
+    id = comment_value(comment, "id")
+    author = author_login(comment)
+    author_type = author_type(comment)
+
+    %ReviewFeedbackItem{
+      source: "linear_comment",
+      id: if(id, do: "linear_comment:#{id}", else: nil),
+      author: author,
+      author_type: author_type,
+      body: to_string(body || ""),
+      url: comment_value(comment, "url"),
+      created_at:
+        parse_feedback_datetime(
+          comment_value(comment, "createdAt") || comment_value(comment, "created_at")
+        ),
+      updated_at:
+        parse_feedback_datetime(
+          comment_value(comment, "updatedAt") || comment_value(comment, "updated_at") ||
+            comment_value(comment, "createdAt") || comment_value(comment, "created_at")
+        )
+    }
+  end
+
+  def linear_feedback_item(_), do: nil
+
+  def pr_feedback_item_from_payload(%PullRequestRef{} = ref, source, payload)
+      when is_map(payload) do
+    body =
+      payload
+      |> pr_feedback_body(source)
+
+    id = comment_value(payload, "id")
+    author = author_login(payload)
+    author_type = author_type(payload)
+
+    created_at =
+      parse_feedback_datetime(
+        comment_value(payload, "created_at") || comment_value(payload, "createdAt") ||
+          comment_value(payload, "submitted_at") || comment_value(payload, "submittedAt")
+      )
+
+    updated_at =
+      parse_feedback_datetime(
+        comment_value(payload, "updated_at") || comment_value(payload, "updatedAt") ||
+          comment_value(payload, "submitted_at") || comment_value(payload, "submittedAt") ||
+          comment_value(payload, "created_at") || comment_value(payload, "createdAt")
+      )
+
+    %ReviewFeedbackItem{
+      source: to_string(source),
+      id: "#{PullRequestRef.canonical(ref)}:#{source}:#{id || body_hash(body)}",
+      author: author,
+      author_type: author_type,
+      body: to_string(body || ""),
+      url: comment_value(payload, "html_url") || comment_value(payload, "url"),
+      created_at: created_at,
+      updated_at: updated_at
+    }
+  end
+
+  def pr_feedback_item_from_payload(_, _, _), do: nil
+
+  defp pr_feedback_body(payload, "github_pr_review") do
+    body = to_string(comment_value(payload, "body") || "")
+    state = comment_value(payload, "state") |> to_string() |> String.trim()
+
+    if String.trim(body) == "" and state != "" and String.upcase(state) != "APPROVED" do
+      "Review state: #{state}"
+    else
+      body
+    end
+  end
+
+  defp pr_feedback_body(payload, _source), do: to_string(comment_value(payload, "body") || "")
+
+  def human_feedback_items(items) do
+    items
+    |> normalize_feedback_items()
+    |> Enum.filter(&human_feedback_item?/1)
+  end
+
+  def human_feedback_item?(%ReviewFeedbackItem{} = item) do
+    body = String.trim(to_string(item.body || ""))
+
+    body != "" and not bot_author?(item) and not automation_author?(item) and
+      not automation_body?(body)
+  end
+
+  def human_feedback_item?(_), do: false
+
+  def feedback_fingerprint(items) do
+    tokens =
+      items
+      |> normalize_feedback_items()
+      |> Enum.map(&feedback_token/1)
+      |> Enum.sort()
+
+    tokens
+    |> Jason.encode!()
+    |> sha256()
+  end
+
+  def latest_feedback_at(items) do
+    items
+    |> normalize_feedback_items()
+    |> Enum.map(&(&1.updated_at || &1.created_at))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.reduce(nil, fn datetime, latest ->
+      if is_nil(latest) or DateTime.compare(datetime, latest) == :gt,
+        do: datetime,
+        else: latest
     end)
   end
 
@@ -423,4 +661,110 @@ defmodule Symphony.Review do
 
   defp maybe_string(nil), do: nil
   defp maybe_string(value), do: to_string(value)
+
+  defp normalize_feedback_items(items) do
+    Enum.flat_map(items || [], fn
+      %ReviewFeedbackItem{} = item -> [item]
+      item when is_map(item) -> if parsed = linear_feedback_item(item), do: [parsed], else: []
+      _ -> []
+    end)
+  end
+
+  defp dedupe_feedback_items(items) do
+    items
+    |> Enum.reduce({MapSet.new(), []}, fn item, {seen, acc} ->
+      key = feedback_item_id(item)
+
+      if MapSet.member?(seen, key),
+        do: {seen, acc},
+        else: {MapSet.put(seen, key), acc ++ [item]}
+    end)
+    |> elem(1)
+  end
+
+  defp feedback_item_id(%ReviewFeedbackItem{} = item) do
+    item.id || "#{item.source}:#{item.author}:#{body_hash(item.body)}"
+  end
+
+  defp feedback_token(%ReviewFeedbackItem{} = item) do
+    %{
+      "source" => to_string(item.source || ""),
+      "id" => feedback_item_id(item),
+      "author" => to_string(item.author || ""),
+      "body_hash" => body_hash(item.body),
+      "updated_at" => Utils.isoformat_z(item.updated_at || item.created_at)
+    }
+  end
+
+  defp body_hash(body), do: sha256(String.trim(to_string(body || "")))
+
+  defp sha256(value) do
+    :crypto.hash(:sha256, to_string(value))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp bot_author?(%ReviewFeedbackItem{} = item) do
+    author = item.author |> to_string() |> String.downcase()
+    type = item.author_type |> to_string() |> String.downcase()
+
+    type == "bot" or String.contains?(author, "[bot]") or String.ends_with?(author, "-bot")
+  end
+
+  defp automation_author?(%ReviewFeedbackItem{} = item) do
+    author = item.author |> to_string() |> String.downcase()
+    String.contains?(author, "symphony") or String.contains?(author, "codex")
+  end
+
+  defp automation_body?(body) do
+    text = String.downcase(to_string(body || ""))
+
+    String.contains?(text, "## codex workpad") or
+      String.contains?(text, "## symphony blocked escalation") or
+      String.contains?(text, "symphony fallback created this workpad")
+  end
+
+  defp author_login(map) do
+    author =
+      comment_value(map, "author") || comment_value(map, "user") || comment_value(map, "creator") ||
+        comment_value(map, "createdBy")
+
+    cond do
+      is_binary(author) ->
+        author
+
+      is_map(author) ->
+        comment_value(author, "login") || comment_value(author, "name") ||
+          comment_value(author, "displayName") || comment_value(author, "email")
+
+      true ->
+        nil
+    end
+  end
+
+  defp author_type(map) do
+    author =
+      comment_value(map, "author") || comment_value(map, "user") || comment_value(map, "creator") ||
+        comment_value(map, "createdBy")
+
+    cond do
+      is_map(author) ->
+        comment_value(author, "type")
+
+      true ->
+        comment_value(map, "authorType") || comment_value(map, "author_type") ||
+          comment_value(map, "type")
+    end
+  end
+
+  defp comment_value(map, key) when is_map(map) do
+    Map.get(map, key) || Map.get(map, String.to_existing_atom(key))
+  rescue
+    ArgumentError -> Map.get(map, key)
+  end
+
+  defp parse_feedback_datetime(nil), do: nil
+
+  defp parse_feedback_datetime(%DateTime{} = datetime), do: datetime
+
+  defp parse_feedback_datetime(value), do: Utils.parse_datetime(value)
 end

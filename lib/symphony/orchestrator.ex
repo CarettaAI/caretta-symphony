@@ -16,14 +16,17 @@ defmodule Symphony.Orchestrator do
     CodexTotals,
     CompletedEntry,
     Issue,
+    IssueAssignee,
     IssueAttachment,
     RepoPlan,
     RepoPlanItem,
+    ReviewFeedbackState,
     RetryEntry,
     RunningEntry,
     RuntimeState
   }
 
+  alias Symphony.Review
   alias Symphony.Review.ReviewPullRequestResolver
   alias Symphony.Tracker
   alias Symphony.Utils
@@ -33,6 +36,7 @@ defmodule Symphony.Orchestrator do
   @default_call_timeout_ms 5_000
   @persist_coalesce_ms 500
   @review_reconcile_timeout_ms 30_000
+  @blocked_escalation_header "## Symphony Blocked Escalation"
   @snapshot_cache_table :symphony_orchestrator_snapshot_cache
   @state_file_name ".symphony-state.json"
 
@@ -256,7 +260,14 @@ defmodule Symphony.Orchestrator do
         Process.demonitor(ref, [:flush])
         if task_meta.timer_ref, do: Process.cancel_timer(task_meta.timer_ref)
         log_review_reconcile_result(result)
-        {:noreply, %{orchestrator | review_task: nil}}
+
+        orchestrator =
+          orchestrator
+          |> Map.put(:review_task, nil)
+          |> apply_review_reconciliation_result(result)
+          |> publish_snapshot_cache()
+
+        {:noreply, orchestrator}
 
       _ ->
         {:noreply, orchestrator}
@@ -629,6 +640,9 @@ defmodule Symphony.Orchestrator do
     candidates_by_id = Map.new(candidates, &{&1.id, &1})
     candidate_snapshot_complete? = Keyword.get(opts, :candidate_snapshot_complete, false)
 
+    tracker =
+      Keyword.get_lazy(opts, :tracker, fn -> make_tracker(orchestrator, config.tracker) end)
+
     orchestrator.state.blocked
     |> Enum.reduce(orchestrator, fn {issue_id, blocked}, acc ->
       current_issue = candidates_by_id[issue_id]
@@ -641,10 +655,14 @@ defmodule Symphony.Orchestrator do
         !blocked_issue_still_active?(issue, config) ->
           release_blocked_issue(acc, issue_id, "blocked issue is no longer dispatchable")
 
+        blocked_issue_has_human_response?(tracker, blocked) ->
+          release_blocked_issue(acc, issue_id, "human response added after block")
+
         !blocked_rules_tie?(blocked) ->
-          acc
+          maybe_escalate_blocked_issue(acc, tracker, config, blocked)
 
         true ->
+          acc = maybe_escalate_blocked_issue(acc, tracker, config, blocked)
           rules_config = %{config.repositories | planner: "rules"}
 
           plan =
@@ -695,6 +713,197 @@ defmodule Symphony.Orchestrator do
     }
 
     %{orchestrator | state: state}
+  end
+
+  defp maybe_escalate_blocked_issue(
+         %__MODULE__{} = orchestrator,
+         tracker,
+         %ServiceConfig{} = config,
+         %BlockedEntry{} = blocked
+       ) do
+    cond do
+      !config.tracker.blocked_escalation_enabled ->
+        orchestrator
+
+      !tracker_supports?(tracker, :save_issue_comment) ->
+        orchestrator
+
+      true ->
+        do_escalate_blocked_issue(orchestrator, tracker, config, blocked)
+    end
+  end
+
+  defp do_escalate_blocked_issue(orchestrator, tracker, config, blocked) do
+    body = blocked_escalation_body(blocked, config)
+    fingerprint = sha256(body)
+
+    if blocked.escalation_comment_id && blocked.escalation_fingerprint == fingerprint do
+      orchestrator
+    else
+      comments = blocked_issue_comments(tracker, blocked.issue)
+      comment_id = blocked.escalation_comment_id || find_blocked_escalation_comment_id(comments)
+
+      response =
+        call_tracker(
+          tracker,
+          :save_issue_comment,
+          [blocked.issue.identifier, body, if(comment_id, do: [comment_id: comment_id], else: [])]
+        )
+
+      saved_comment_id = comment_id || comment_id_from_response(response)
+
+      updated = %{
+        blocked
+        | escalation_comment_id: saved_comment_id,
+          escalation_fingerprint: fingerprint,
+          escalation_at: Utils.now_utc(),
+          escalation_error: nil
+      }
+
+      Logging.log_event(:info, "blocked_issue_escalated",
+        issue_id: blocked.issue.id,
+        issue_identifier: blocked.issue.identifier,
+        comment_id: saved_comment_id
+      )
+
+      put_blocked_entry(orchestrator, updated)
+    end
+  rescue
+    error ->
+      reason = Utils.truncate(Exception.message(error), 500)
+
+      Logging.log_event(:warning, "blocked_issue_escalation_failed",
+        issue_id: blocked.issue && blocked.issue.id,
+        issue_identifier: blocked.issue && blocked.issue.identifier,
+        reason: reason
+      )
+
+      put_blocked_entry(orchestrator, %{blocked | escalation_error: reason})
+  end
+
+  defp blocked_issue_has_human_response?(tracker, %BlockedEntry{} = blocked) do
+    if tracker_supports?(tracker, :list_issue_comments) and blocked.blocked_at do
+      tracker
+      |> blocked_issue_comments(blocked.issue)
+      |> Review.linear_feedback_items()
+      |> Review.human_feedback_items()
+      |> Enum.any?(fn item ->
+        timestamp = item.updated_at || item.created_at
+        timestamp && DateTime.compare(timestamp, blocked.blocked_at) == :gt
+      end)
+    else
+      false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp blocked_issue_comments(tracker, %Issue{} = issue) do
+    if tracker_supports?(tracker, :list_issue_comments) do
+      call_tracker(tracker, :list_issue_comments, [issue.identifier])
+    else
+      []
+    end
+  end
+
+  defp blocked_escalation_body(%BlockedEntry{} = blocked, %ServiceConfig{} = config) do
+    mention = blocked_escalation_mention(blocked.issue, config)
+    mention_line = if mention, do: "#{mention} ", else: ""
+
+    repo_plan =
+      case blocked.repo_plan do
+        %RepoPlan{} = plan ->
+          """
+          Repo plan:
+          - Primary repo: #{plan.primary_repo && plan.primary_repo.slug}
+          - Needs human: #{plan.needs_human}
+          - Human reason: #{plan.human_reason || "n/a"}
+          - Notes: #{plan.notes || "n/a"}
+          """
+
+        _ ->
+          "Repo plan: n/a"
+      end
+
+    workspace =
+      if blocked.workspace_path,
+        do: "Workspace: `#{blocked.workspace_path}`",
+        else: "Workspace: n/a"
+
+    """
+    #{@blocked_escalation_header}
+
+    #{mention_line}Symphony is blocked and could not resolve this autonomously.
+
+    Reason:
+    #{blocked.reason}
+
+    #{workspace}
+
+    #{String.trim(repo_plan)}
+
+    Next step:
+    Add the missing decision, repository mapping, credential, approval, or blocker resolution in this issue. After a human reply, Symphony will release the block and retry the issue on the next poll.
+    """
+    |> String.trim()
+  end
+
+  defp blocked_escalation_mention(%Issue{} = issue, %ServiceConfig{} = config) do
+    issue_assignee_mention(issue) || fallback_blocked_escalation_mention(config)
+  end
+
+  defp fallback_blocked_escalation_mention(%ServiceConfig{} = config) do
+    config.tracker.blocked_escalation_mentions
+    |> Enum.map(&(to_string(&1) |> String.trim()))
+    |> Enum.find(&(&1 != ""))
+  end
+
+  defp issue_assignee_mention(%Issue{assignee: %IssueAssignee{} = assignee}) do
+    cond do
+      !blank?(assignee.mention) ->
+        assignee.mention
+
+      !blank?(assignee.display_name) ->
+        "@#{assignee.display_name}"
+
+      !blank?(assignee.name) ->
+        "@#{assignee.name}"
+
+      true ->
+        nil
+    end
+  end
+
+  defp issue_assignee_mention(_), do: nil
+
+  defp find_blocked_escalation_comment_id(comments) do
+    Enum.find_value(comments, fn comment ->
+      body = Utils.map_get(comment, "body") || Utils.map_get(comment, "text") || ""
+
+      if String.contains?(to_string(body), @blocked_escalation_header) do
+        Utils.map_get(comment, "id")
+      end
+    end)
+  end
+
+  defp comment_id_from_response(response) when is_map(response) do
+    Utils.map_get(response, "id") || get_in(response, ["comment", "id"])
+  end
+
+  defp comment_id_from_response(_), do: nil
+
+  defp put_blocked_entry(%__MODULE__{} = orchestrator, %BlockedEntry{} = blocked) do
+    state = %{
+      orchestrator.state
+      | blocked: Map.put(orchestrator.state.blocked, blocked.issue.id, blocked)
+    }
+
+    %{orchestrator | state: state}
+  end
+
+  defp sha256(value) do
+    :crypto.hash(:sha256, to_string(value))
+    |> Base.encode16(case: :lower)
   end
 
   defp reconcile_stalled(%__MODULE__{} = orchestrator, %ServiceConfig{} = config) do
@@ -1124,7 +1333,7 @@ defmodule Symphony.Orchestrator do
         {^ref, result} ->
           Process.demonitor(monitor_ref, [:flush])
           log_review_reconcile_result(result)
-          orchestrator
+          apply_review_reconciliation_result(orchestrator, result)
 
         {:DOWN, ^monitor_ref, :process, ^pid, reason} ->
           Logging.log_event(:warning, "review_reconcile_task_exited", reason: inspect(reason))
@@ -1146,8 +1355,7 @@ defmodule Symphony.Orchestrator do
   end
 
   defp run_review_reconciliation(orchestrator, tracker, config) do
-    reconcile_review_issues(orchestrator, tracker, config)
-    :ok
+    {:ok, build_review_reconciliation_result(orchestrator, tracker, config)}
   rescue
     error ->
       {:error, Exception.message(error)}
@@ -1168,65 +1376,165 @@ defmodule Symphony.Orchestrator do
   end
 
   defp log_review_reconcile_result(:ok), do: :ok
+  defp log_review_reconcile_result({:ok, _result}), do: :ok
 
   defp log_review_reconcile_result({:error, reason}) do
     Logging.log_event(:warning, "review_reconcile_failed", reason: Utils.truncate(reason, 500))
   end
 
   def reconcile_review_issues(%__MODULE__{} = orchestrator, tracker, %ServiceConfig{} = config) do
+    result = {:ok, build_review_reconciliation_result(orchestrator, tracker, config)}
+    apply_review_reconciliation_result(orchestrator, result)
+  end
+
+  defp build_review_reconciliation_result(
+         %__MODULE__{} = orchestrator,
+         tracker,
+         %ServiceConfig{} = config
+       ) do
     if config.tracker.review_states == [] or !tracker_supports?(tracker, :save_issue_state) do
-      orchestrator
+      %{review_feedback: [], rework_issue_ids: []}
     else
-      review_issues =
-        try do
-          call_tracker(tracker, :fetch_issues_by_states, [config.tracker.review_states])
-        rescue
-          _ -> []
-        end
-
-      refreshed =
-        try do
-          call_tracker(tracker, :fetch_issue_states_by_ids, [Enum.map(review_issues, & &1.id)])
-        rescue
-          _ -> review_issues
-        end
-
+      review_issues = fetch_review_issues(tracker, config)
+      refreshed = refresh_review_issues(tracker, review_issues)
       workspace_manager = WorkspaceManager.new(config.workspace, config.hooks)
+      now = Utils.now_utc()
 
       refreshed
       |> dedupe_by_id()
-      |> Enum.each(fn issue ->
+      |> Enum.reduce(%{review_feedback: [], rework_issue_ids: []}, fn issue, acc ->
         if has_required_labels?(issue, config) do
-          comments =
-            if tracker_supports?(tracker, :list_issue_comments) do
-              try do
-                call_tracker(tracker, :list_issue_comments, [issue.identifier])
-              rescue
-                _ -> []
-              end
-            else
-              []
-            end
-
-          workspace_path =
-            WorkspaceManager.workspace_path_for_identifier(workspace_manager, issue.identifier)
-
-          result =
-            evaluate_review(orchestrator.review_resolver, issue,
-              comments: comments,
-              workspace_path: workspace_path,
-              base_branch: config.tracker.merge_base_branch
-            )
-
-          if result.ready do
-            call_tracker(tracker, :save_issue_state, [issue.identifier, config.tracker.done_state])
-          end
+          reconcile_review_issue(
+            orchestrator,
+            tracker,
+            config,
+            workspace_manager,
+            issue,
+            acc,
+            now
+          )
+        else
+          acc
         end
       end)
-
-      orchestrator
     end
   end
+
+  defp fetch_review_issues(tracker, config) do
+    call_tracker(tracker, :fetch_issues_by_states, [config.tracker.review_states])
+  rescue
+    _ -> []
+  end
+
+  defp refresh_review_issues(tracker, review_issues) do
+    call_tracker(tracker, :fetch_issue_states_by_ids, [Enum.map(review_issues, & &1.id)])
+  rescue
+    _ -> review_issues
+  end
+
+  defp reconcile_review_issue(
+         orchestrator,
+         tracker,
+         config,
+         workspace_manager,
+         issue,
+         acc,
+         now
+       ) do
+    comments = review_issue_comments(tracker, issue)
+
+    workspace_path =
+      WorkspaceManager.workspace_path_for_identifier(workspace_manager, issue.identifier)
+
+    result =
+      evaluate_review(orchestrator.review_resolver, issue,
+        comments: comments,
+        workspace_path: workspace_path,
+        base_branch: config.tracker.merge_base_branch
+      )
+
+    snapshot =
+      review_feedback_snapshot(orchestrator.review_resolver, comments, result.required_prs)
+
+    {feedback_state, changed?} =
+      next_review_feedback_state(orchestrator, issue, snapshot, now)
+
+    acc = %{acc | review_feedback: acc.review_feedback ++ [feedback_state]}
+
+    cond do
+      changed? ->
+        call_tracker(tracker, :save_issue_state, [issue.identifier, config.tracker.rework_state])
+
+        Logging.log_event(:info, "review_feedback_rework_detected",
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          rework_state: config.tracker.rework_state
+        )
+
+        %{acc | rework_issue_ids: acc.rework_issue_ids ++ [issue.id]}
+
+      result.ready ->
+        call_tracker(tracker, :save_issue_state, [issue.identifier, config.tracker.done_state])
+        acc
+
+      true ->
+        acc
+    end
+  end
+
+  defp review_issue_comments(tracker, issue) do
+    if tracker_supports?(tracker, :list_issue_comments) do
+      call_tracker(tracker, :list_issue_comments, [issue.identifier])
+    else
+      []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp next_review_feedback_state(orchestrator, issue, snapshot, now) do
+    previous = orchestrator.state.review_feedback[issue.id]
+    changed? = previous && previous.fingerprint != snapshot.fingerprint
+
+    state = %ReviewFeedbackState{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      fingerprint: snapshot.fingerprint,
+      latest_feedback_at: snapshot.latest_feedback_at,
+      last_triggered_at: if(changed?, do: now, else: previous && previous.last_triggered_at)
+    }
+
+    {state, !!changed?}
+  end
+
+  defp apply_review_reconciliation_result(orchestrator, {:ok, result}) when is_map(result) do
+    updates =
+      result
+      |> Map.get(:review_feedback, [])
+      |> Enum.reject(&is_nil/1)
+      |> Map.new(&{&1.issue_id, &1})
+
+    rework_issue_ids = Map.get(result, :rework_issue_ids, [])
+
+    if map_size(updates) == 0 and rework_issue_ids == [] do
+      orchestrator
+    else
+      state = %{
+        orchestrator.state
+        | review_feedback: Map.merge(orchestrator.state.review_feedback, updates)
+      }
+
+      orchestrator = persist_state(%{orchestrator | state: state})
+
+      if rework_issue_ids == [] or is_nil(orchestrator.task_supervisor) do
+        orchestrator
+      else
+        request_refresh_internal(orchestrator)
+      end
+    end
+  end
+
+  defp apply_review_reconciliation_result(orchestrator, _result), do: orchestrator
 
   def dispatch_issue_sync(%__MODULE__{} = orchestrator, %Issue{} = issue, tracker, attempt \\ nil) do
     {_manager, _workflow, config} = ConfigManager.current(orchestrator.config_manager)
@@ -1393,7 +1701,13 @@ defmodule Symphony.Orchestrator do
               claimed: MapSet.put(orchestrator.state.claimed, issue_id)
           }
 
-          persist_state(%{orchestrator | state: state})
+          orchestrator = %{orchestrator | state: state}
+          {_manager, _workflow, config} = ConfigManager.current(orchestrator.config_manager)
+          tracker = make_tracker(orchestrator, config.tracker)
+
+          orchestrator
+          |> maybe_escalate_blocked_issue(tracker, config, blocked)
+          |> persist_state()
 
         !result.retryable ->
           state = %{
@@ -1601,6 +1915,7 @@ defmodule Symphony.Orchestrator do
           "labels" => blocked.issue.labels,
           "blocked_at" => Utils.isoformat_z(blocked.blocked_at),
           "reason" => blocked.reason,
+          "escalation" => blocked_escalation_to_public_map(blocked),
           "workspace" => %{"path" => blocked.workspace_path && to_string(blocked.workspace_path)},
           "repo_plan" => blocked.repo_plan && RepoPlan.to_map(blocked.repo_plan)
         }
@@ -1611,6 +1926,12 @@ defmodule Symphony.Orchestrator do
       |> Map.values()
       |> Enum.sort_by(&DateTime.to_unix(&1.completed_at, :microsecond), :desc)
       |> Enum.map(&completed_entry_snapshot/1)
+
+    review_feedback =
+      orchestrator.state.review_feedback
+      |> Map.values()
+      |> Enum.sort_by(& &1.identifier)
+      |> Enum.map(&ReviewFeedbackState.to_map/1)
 
     active_runtime =
       orchestrator.state.running
@@ -1640,12 +1961,14 @@ defmodule Symphony.Orchestrator do
         "retrying" => retrying_count,
         "queued" => length(retrying),
         "blocked" => length(blocked),
-        "completed" => length(completed)
+        "completed" => length(completed),
+        "review_feedback_tracked" => length(review_feedback)
       },
       "running" => running,
       "retrying" => retrying,
       "blocked" => blocked,
       "completed" => completed,
+      "review_feedback" => review_feedback,
       "codex_totals" => totals,
       "rate_limits" => orchestrator.state.codex_rate_limits
     }
@@ -1773,6 +2096,25 @@ defmodule Symphony.Orchestrator do
 
   defp evaluate_review(resolver, issue, opts) when is_atom(resolver),
     do: apply(resolver, :evaluate, [issue, opts])
+
+  defp review_feedback_snapshot(%ReviewPullRequestResolver{} = resolver, comments, prs),
+    do: ReviewPullRequestResolver.feedback_snapshot(resolver, comments, prs)
+
+  defp review_feedback_snapshot(resolver, comments, prs) when is_map(resolver) do
+    if Map.has_key?(resolver, :feedback_snapshot) do
+      resolver.feedback_snapshot.(comments, prs)
+    else
+      Review.feedback_snapshot(comments, [])
+    end
+  end
+
+  defp review_feedback_snapshot(resolver, comments, prs) when is_atom(resolver) do
+    if function_exported?(resolver, :feedback_snapshot, 2) do
+      apply(resolver, :feedback_snapshot, [comments, prs])
+    else
+      Review.feedback_snapshot(comments, [])
+    end
+  end
 
   defp dedupe_by_id(issues) do
     issues
@@ -2129,6 +2471,10 @@ defmodule Symphony.Orchestrator do
         orchestrator.state.completed |> Map.values() |> Enum.map(&completed_entry_to_map/1),
       "blocked" =>
         orchestrator.state.blocked |> Map.values() |> Enum.map(&blocked_entry_to_map/1),
+      "review_feedback" =>
+        orchestrator.state.review_feedback
+        |> Map.values()
+        |> Enum.map(&ReviewFeedbackState.to_map/1),
       "retry_attempts" =>
         orchestrator.state.retry_attempts |> Map.values() |> Enum.map(&retry_entry_to_map/1)
     }
@@ -2159,6 +2505,14 @@ defmodule Symphony.Orchestrator do
             (payload["blocked"] || [])
             |> Enum.flat_map(fn raw ->
               if entry = blocked_entry_from_map(raw), do: [{entry.issue.id, entry}], else: []
+            end)
+            |> Map.new(),
+          review_feedback:
+            (payload["review_feedback"] || [])
+            |> Enum.flat_map(fn raw ->
+              if entry = review_feedback_state_from_map(raw),
+                do: [{entry.issue_id, entry}],
+                else: []
             end)
             |> Map.new(),
           retry_attempts:
@@ -2230,13 +2584,25 @@ defmodule Symphony.Orchestrator do
       "error" => entry.error
     }
 
+  defp blocked_escalation_to_public_map(%BlockedEntry{} = entry) do
+    %{
+      "comment_id" => entry.escalation_comment_id,
+      "escalated_at" => Utils.isoformat_z(entry.escalation_at),
+      "error" => entry.escalation_error
+    }
+  end
+
   defp blocked_entry_to_map(entry),
     do: %{
       "issue" => Issue.to_template_data(entry.issue),
       "reason" => entry.reason,
       "blocked_at" => Utils.isoformat_z(entry.blocked_at),
       "workspace_path" => entry.workspace_path && to_string(entry.workspace_path),
-      "repo_plan" => entry.repo_plan && RepoPlan.to_map(entry.repo_plan)
+      "repo_plan" => entry.repo_plan && RepoPlan.to_map(entry.repo_plan),
+      "escalation_comment_id" => entry.escalation_comment_id,
+      "escalation_fingerprint" => entry.escalation_fingerprint,
+      "escalation_at" => Utils.isoformat_z(entry.escalation_at),
+      "escalation_error" => entry.escalation_error
     }
 
   defp completed_entry_to_map(entry) do
@@ -2303,6 +2669,24 @@ defmodule Symphony.Orchestrator do
 
   defp retry_entry_from_map(_), do: nil
 
+  defp review_feedback_state_from_map(value) when is_map(value) do
+    issue_id = value["issue_id"]
+    identifier = value["identifier"]
+    fingerprint = value["fingerprint"]
+
+    if issue_id && identifier && fingerprint do
+      %ReviewFeedbackState{
+        issue_id: to_string(issue_id),
+        identifier: to_string(identifier),
+        fingerprint: to_string(fingerprint),
+        latest_feedback_at: Utils.parse_datetime(value["latest_feedback_at"]),
+        last_triggered_at: Utils.parse_datetime(value["last_triggered_at"])
+      }
+    end
+  end
+
+  defp review_feedback_state_from_map(_), do: nil
+
   defp blocked_entry_from_map(value) when is_map(value) do
     with %Issue{} = issue <- issue_from_map(value["issue"]),
          %DateTime{} = blocked_at <- Utils.parse_datetime(value["blocked_at"]) do
@@ -2311,7 +2695,11 @@ defmodule Symphony.Orchestrator do
         reason: to_string(value["reason"] || ""),
         blocked_at: blocked_at,
         workspace_path: value["workspace_path"],
-        repo_plan: if(is_map(value["repo_plan"]), do: repo_plan_from_map(value["repo_plan"]))
+        repo_plan: if(is_map(value["repo_plan"]), do: repo_plan_from_map(value["repo_plan"])),
+        escalation_comment_id: value["escalation_comment_id"],
+        escalation_fingerprint: value["escalation_fingerprint"],
+        escalation_at: Utils.parse_datetime(value["escalation_at"]),
+        escalation_error: value["escalation_error"]
       }
     else
       _ -> nil
@@ -2371,6 +2759,7 @@ defmodule Symphony.Orchestrator do
         state: to_string(value["state"] || ""),
         branch_name: value["branch_name"],
         url: value["url"],
+        assignee: assignee_from_map(value["assignee"]),
         labels: Enum.map(value["labels"] || [], &to_string/1),
         attachments:
           Enum.flat_map(value["attachments"] || [], fn
@@ -2402,6 +2791,19 @@ defmodule Symphony.Orchestrator do
   end
 
   defp issue_from_map(_), do: nil
+
+  defp assignee_from_map(value) when is_map(value) do
+    %IssueAssignee{
+      id: value["id"],
+      name: value["name"],
+      display_name: value["display_name"],
+      email: value["email"],
+      url: value["url"],
+      mention: value["mention"]
+    }
+  end
+
+  defp assignee_from_map(_), do: nil
 
   defp repo_plan_from_map(data) do
     item = fn

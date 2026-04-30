@@ -19,8 +19,11 @@ defmodule Symphony.Config do
               review_states: ["In Review", "Merging"],
               required_labels: [],
               handoff_state: "In Review",
+              rework_state: "Rework",
               done_state: "Done",
-              merge_base_branch: "dev"
+              merge_base_branch: "dev",
+              blocked_escalation_enabled: true,
+              blocked_escalation_mentions: []
 
     def active_state_set(config), do: state_set(config.active_states)
     def terminal_state_set(config), do: state_set(config.terminal_states)
@@ -154,6 +157,31 @@ defmodule Symphony.Config do
     end
   end
 
+  defmodule SelfHealingConfig do
+    defstruct enabled: false,
+              base_branch: "main",
+              branch_prefix: "codex/self-heal",
+              workspace_root: nil,
+              stale_poll_ms: 120_000,
+              cooldown_ms: 900_000,
+              max_attempts: 3,
+              validation_commands: [
+                "mix format --check-formatted",
+                "mix test",
+                "mix escript.build"
+              ],
+              repair_codex: %CodexConfig{
+                approval_policy: "never",
+                thread_sandbox: "workspace-write",
+                turn_sandbox_policy: %{"type" => "workspaceWrite", "networkAccess" => true},
+                model: "gpt-5.5",
+                effort: "xhigh"
+              },
+              tmux_session: "symphony-elixir",
+              restart_port: 8765,
+              restart_workflow_path: nil
+  end
+
   defmodule ServiceConfig do
     defstruct workflow_path: nil,
               tracker: %TrackerConfig{},
@@ -165,7 +193,8 @@ defmodule Symphony.Config do
               server: %ServerConfig{},
               context: %ContextConfig{},
               dashboard: %DashboardConfig{},
-              repositories: %RepositoryPlanningConfig{}
+              repositories: %RepositoryPlanningConfig{},
+              self_healing: %SelfHealingConfig{}
   end
 
   defmodule ConfigManager do
@@ -265,8 +294,21 @@ defmodule Symphony.Config do
       required_labels:
         string_list(get(tracker_raw, "required_labels"), [], "tracker.required_labels"),
       handoff_state: to_string(get(tracker_raw, "handoff_state", "In Review")),
+      rework_state: to_string(get(tracker_raw, "rework_state", "Rework")),
       done_state: to_string(get(tracker_raw, "done_state", "Done")),
-      merge_base_branch: to_string(get(tracker_raw, "merge_base_branch", "dev"))
+      merge_base_branch: to_string(get(tracker_raw, "merge_base_branch", "dev")),
+      blocked_escalation_enabled:
+        bool_value(
+          get(tracker_raw, "blocked_escalation_enabled"),
+          true,
+          "tracker.blocked_escalation_enabled"
+        ),
+      blocked_escalation_mentions:
+        string_list(
+          get(tracker_raw, "blocked_escalation_mentions"),
+          [],
+          "tracker.blocked_escalation_mentions"
+        )
     }
 
     polling_raw = section(raw, "polling")
@@ -466,6 +508,106 @@ defmodule Symphony.Config do
         )
     }
 
+    self_healing_raw = section(raw, "self_healing")
+    self_healing_codex_raw = section(self_healing_raw, "codex")
+    self_healing_restart_raw = section(self_healing_raw, "restart")
+
+    self_healing_repair_codex = %CodexConfig{
+      command: to_string(get(self_healing_codex_raw, "command", codex.command)),
+      approval_policy: to_string(get(self_healing_codex_raw, "approval_policy", "never")),
+      thread_sandbox: to_string(get(self_healing_codex_raw, "thread_sandbox", "workspace-write")),
+      turn_sandbox_policy:
+        get(self_healing_codex_raw, "turn_sandbox_policy") ||
+          %{"type" => "workspaceWrite", "networkAccess" => true},
+      turn_timeout_ms:
+        int_value(
+          get(self_healing_codex_raw, "turn_timeout_ms"),
+          codex.turn_timeout_ms,
+          "self_healing.codex.turn_timeout_ms",
+          positive: true
+        ),
+      read_timeout_ms:
+        int_value(
+          get(self_healing_codex_raw, "read_timeout_ms"),
+          codex.read_timeout_ms,
+          "self_healing.codex.read_timeout_ms",
+          positive: true
+        ),
+      stall_timeout_ms:
+        int_value(
+          get(self_healing_codex_raw, "stall_timeout_ms"),
+          codex.stall_timeout_ms,
+          "self_healing.codex.stall_timeout_ms"
+        ),
+      model: string_or_nil(get(self_healing_codex_raw, "model")) || "gpt-5.5",
+      effort: string_or_nil(get(self_healing_codex_raw, "effort")) || "xhigh",
+      summary: string_or_nil(get(self_healing_codex_raw, "summary")),
+      personality: string_or_nil(get(self_healing_codex_raw, "personality"))
+    }
+
+    self_healing = %SelfHealingConfig{
+      enabled: bool_value(get(self_healing_raw, "enabled"), false, "self_healing.enabled"),
+      base_branch: clean_default(get(self_healing_raw, "base_branch"), "main"),
+      branch_prefix:
+        get(self_healing_raw, "branch_prefix", "codex/self-heal")
+        |> to_string()
+        |> String.trim("/")
+        |> clean_default("codex/self-heal"),
+      workspace_root:
+        resolve_path(get(self_healing_raw, "workspace_root"),
+          default: Path.join(workflow_dir, ".symphony-self-heal"),
+          workflow_dir: workflow_dir,
+          environ: environ
+        ),
+      stale_poll_ms:
+        int_value(
+          get(self_healing_raw, "stale_poll_ms"),
+          120_000,
+          "self_healing.stale_poll_ms",
+          positive: true
+        ),
+      cooldown_ms:
+        int_value(
+          get(self_healing_raw, "cooldown_ms"),
+          900_000,
+          "self_healing.cooldown_ms",
+          positive: true
+        ),
+      max_attempts:
+        int_value(
+          get(self_healing_raw, "max_attempts"),
+          3,
+          "self_healing.max_attempts",
+          positive: true
+        ),
+      validation_commands:
+        string_list(
+          get(self_healing_raw, "validation_commands"),
+          [
+            "mix format --check-formatted",
+            "mix test",
+            "mix escript.build"
+          ],
+          "self_healing.validation_commands"
+        ),
+      repair_codex: self_healing_repair_codex,
+      tmux_session:
+        clean_default(get(self_healing_restart_raw, "tmux_session"), "symphony-elixir"),
+      restart_port:
+        int_value(
+          get(self_healing_restart_raw, "port"),
+          server.port || 8765,
+          "self_healing.restart.port",
+          minimum: 0
+        ),
+      restart_workflow_path:
+        resolve_path(get(self_healing_restart_raw, "workflow_path"),
+          default: workflow.path,
+          workflow_dir: workflow_dir,
+          environ: environ
+        )
+    }
+
     %ServiceConfig{
       workflow_path: workflow.path,
       tracker: tracker,
@@ -477,7 +619,8 @@ defmodule Symphony.Config do
       server: server,
       context: %ContextConfig{coding: coding},
       dashboard: dashboard,
-      repositories: repositories
+      repositories: repositories,
+      self_healing: self_healing
     }
   end
 
@@ -517,6 +660,26 @@ defmodule Symphony.Config do
       true ->
         validate_coding_context!(config.context.coding)
         validate_repositories!(config.repositories)
+        validate_self_healing!(config.self_healing)
+        :ok
+    end
+  end
+
+  defp validate_self_healing!(%SelfHealingConfig{enabled: false}), do: :ok
+
+  defp validate_self_healing!(%SelfHealingConfig{} = config) do
+    cond do
+      String.trim(config.repair_codex.command || "") == "" ->
+        raise Error,
+          code: :missing_self_healing_codex_command,
+          message: "self_healing.codex.command must be present and non-empty"
+
+      config.validation_commands == [] ->
+        raise Error,
+          code: :missing_self_healing_validation_commands,
+          message: "self_healing.validation_commands must contain at least one command"
+
+      true ->
         :ok
     end
   end

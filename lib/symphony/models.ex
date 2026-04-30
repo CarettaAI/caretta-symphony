@@ -24,6 +24,21 @@ defmodule Symphony.Models do
     end
   end
 
+  defmodule IssueAssignee do
+    defstruct id: nil, name: nil, display_name: nil, email: nil, url: nil, mention: nil
+
+    def to_map(%__MODULE__{} = assignee) do
+      %{
+        "id" => assignee.id,
+        "name" => assignee.name,
+        "display_name" => assignee.display_name,
+        "email" => assignee.email,
+        "url" => assignee.url,
+        "mention" => assignee.mention
+      }
+    end
+  end
+
   defmodule Issue do
     defstruct [
       :id,
@@ -34,6 +49,7 @@ defmodule Symphony.Models do
       state: "",
       branch_name: nil,
       url: nil,
+      assignee: nil,
       labels: [],
       attachments: [],
       blocked_by: [],
@@ -51,6 +67,7 @@ defmodule Symphony.Models do
         "state" => issue.state,
         "branch_name" => issue.branch_name,
         "url" => issue.url,
+        "assignee" => if(issue.assignee, do: IssueAssignee.to_map(issue.assignee), else: nil),
         "labels" => issue.labels,
         "attachments" => Enum.map(issue.attachments, &IssueAttachment.to_map/1),
         "blocked_by" => Enum.map(issue.blocked_by, &BlockerRef.to_map/1),
@@ -162,8 +179,34 @@ defmodule Symphony.Models do
     ]
   end
 
+  defmodule ReviewFeedbackState do
+    defstruct issue_id: nil,
+              identifier: nil,
+              fingerprint: nil,
+              latest_feedback_at: nil,
+              last_triggered_at: nil
+
+    def to_map(%__MODULE__{} = state) do
+      %{
+        "issue_id" => state.issue_id,
+        "identifier" => state.identifier,
+        "fingerprint" => state.fingerprint,
+        "latest_feedback_at" => Utils.isoformat_z(state.latest_feedback_at),
+        "last_triggered_at" => Utils.isoformat_z(state.last_triggered_at)
+      }
+    end
+  end
+
   defmodule BlockedEntry do
-    defstruct issue: nil, reason: nil, blocked_at: nil, workspace_path: nil, repo_plan: nil
+    defstruct issue: nil,
+              reason: nil,
+              blocked_at: nil,
+              workspace_path: nil,
+              repo_plan: nil,
+              escalation_comment_id: nil,
+              escalation_fingerprint: nil,
+              escalation_at: nil,
+              escalation_error: nil
   end
 
   defmodule CompletedEntry do
@@ -250,6 +293,7 @@ defmodule Symphony.Models do
       running: %{},
       claimed: MapSet.new(),
       retry_attempts: %{},
+      review_feedback: %{},
       blocked: %{},
       completed: %{},
       codex_totals: %CodexTotals{},

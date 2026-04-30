@@ -148,6 +148,7 @@ defmodule Symphony.TrackerTest do
               "title" => "Ready",
               "status" => "Todo",
               "priority" => %{"value" => 2, "name" => "High"},
+              "assignee" => %{"id" => "user-1", "displayName" => "Omar", "username" => "omar"},
               "labels" => ["Bug"],
               "gitBranchName" => "agent/eng-1-ready",
               "attachments" => [
@@ -172,6 +173,7 @@ defmodule Symphony.TrackerTest do
           "title" => "Ready",
           "status" => "Todo",
           "priority" => %{"value" => 2, "name" => "High"},
+          "assignee" => %{"id" => "user-1", "displayName" => "Omar", "username" => "omar"},
           "labels" => ["Bug"],
           "attachments" => [
             %{
@@ -207,6 +209,8 @@ defmodule Symphony.TrackerTest do
     assert issue.id == "ENG-1"
     assert issue.identifier == "ENG-1"
     assert issue.labels == ["bug"]
+    assert issue.assignee.display_name == "Omar"
+    assert issue.assignee.mention == "@omar"
 
     assert Enum.map(issue.attachments, & &1.url) == [
              "https://github.com/ExampleOrg/app/pull/1",

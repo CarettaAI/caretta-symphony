@@ -40,12 +40,23 @@ defmodule Symphony.WorkflowConfigTemplateTest do
     assert config.tracker.api_key == "lin-key"
     assert Config.TrackerConfig.required_label_set(config.tracker) == MapSet.new(["codex"])
     assert config.tracker.handoff_state == "In Review"
+    assert config.tracker.rework_state == "Rework"
     assert config.tracker.done_state == "Done"
     assert config.tracker.merge_base_branch == "dev"
+    assert config.tracker.blocked_escalation_enabled
+    assert config.tracker.blocked_escalation_mentions == []
     assert config.tracker.review_states == ["In Review", "Merging"]
     assert config.workspace.root == Path.expand(Path.join(tmp_dir, "work"))
     assert config.agent.max_concurrent_agents_by_state == %{"todo" => 1}
     assert config.codex.command == "codex app-server --listen stdio://"
+    refute config.self_healing.enabled
+
+    assert config.self_healing.workspace_root ==
+             Path.expand(Path.join(tmp_dir, ".symphony-self-heal"))
+
+    assert config.self_healing.repair_codex.model == "gpt-5.5"
+    assert config.self_healing.repair_codex.effort == "xhigh"
+    assert config.self_healing.repair_codex.command == config.codex.command
 
     rendered =
       Templating.render_prompt(
@@ -92,6 +103,7 @@ defmodule Symphony.WorkflowConfigTemplateTest do
       kind: linear
       api_key: $LINEAR_API_KEY
       project_slug: demo
+      blocked_escalation_mentions: ["@operator"]
     ---
     body
     """)
@@ -200,6 +212,70 @@ defmodule Symphony.WorkflowConfigTemplateTest do
     assert augmented =~ "<symphony_coding_context>"
     assert augmented =~ "Use desktop-runtime for live workflow provider work."
     assert String.ends_with?(augmented, "Original prompt")
+  end
+
+  @tag :tmp_dir
+  test "self-healing config parses nested codex and restart settings", %{tmp_dir: tmp_dir} do
+    workflow_path = Path.join(tmp_dir, "WORKFLOW.md")
+
+    File.write!(workflow_path, """
+    ---
+    tracker:
+      kind: linear
+      api_key: $LINEAR_API_KEY
+      project_slug: demo
+      blocked_escalation_mentions: ["@operator"]
+    codex:
+      command: codex app-server
+      turn_timeout_ms: 1000
+    server:
+      port: 8765
+    self_healing:
+      enabled: true
+      base_branch: main
+      branch_prefix: codex/self-heal
+      workspace_root: ./heal
+      stale_poll_ms: 120000
+      cooldown_ms: 900000
+      max_attempts: 3
+      validation_commands:
+        - mix test
+      codex:
+        command: custom codex app-server
+        model: gpt-5.5
+        effort: xhigh
+        approval_policy: never
+        turn_timeout_ms: 2000
+        turn_sandbox_policy:
+          type: workspaceWrite
+          networkAccess: true
+      restart:
+        tmux_session: symphony-test
+        port: 9876
+        workflow_path: ./WORKFLOW.md
+    ---
+    body
+    """)
+
+    config =
+      Config.resolve_config(Workflow.load_workflow(workflow_path), %{
+        "LINEAR_API_KEY" => "lin-key"
+      })
+
+    assert :ok = Config.validate_dispatch_config!(config)
+    assert config.tracker.blocked_escalation_mentions == ["@operator"]
+    assert config.self_healing.enabled
+    assert config.self_healing.base_branch == "main"
+    assert config.self_healing.branch_prefix == "codex/self-heal"
+    assert config.self_healing.workspace_root == Path.expand(Path.join(tmp_dir, "heal"))
+    assert config.self_healing.validation_commands == ["mix test"]
+    assert config.self_healing.repair_codex.command == "custom codex app-server"
+    assert config.self_healing.repair_codex.model == "gpt-5.5"
+    assert config.self_healing.repair_codex.effort == "xhigh"
+    assert config.self_healing.repair_codex.turn_timeout_ms == 2000
+    assert config.self_healing.tmux_session == "symphony-test"
+    assert config.self_healing.restart_port == 9876
+    assert config.self_healing.restart_workflow_path == workflow_path
   end
 
   @tag :tmp_dir

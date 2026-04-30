@@ -3,7 +3,7 @@ defmodule Symphony.Tracker do
 
   alias Symphony.Config.TrackerConfig
   alias Symphony.Error
-  alias Symphony.Models.{BlockerRef, Issue, IssueAttachment}
+  alias Symphony.Models.{BlockerRef, Issue, IssueAssignee, IssueAttachment}
   alias Symphony.Utils
 
   defmodule LinearClient do
@@ -32,6 +32,7 @@ defmodule Symphony.Tracker do
         issues(filter: { id: { in: $ids } }, first: 100) {
           nodes {
             id identifier title description priority branchName url createdAt updatedAt
+            assignee { id name displayName email }
             state { name }
             labels { nodes { name } }
             attachments { nodes { id title subtitle url } }
@@ -70,6 +71,7 @@ defmodule Symphony.Tracker do
         ) {
           nodes {
             id identifier title description priority branchName url createdAt updatedAt
+            assignee { id name displayName email }
             state { name }
             labels { nodes { name } }
             attachments { nodes { id title subtitle url } }
@@ -233,6 +235,7 @@ defmodule Symphony.Tracker do
         state: to_string(state || ""),
         branch_name: node["branchName"],
         url: node["url"],
+        assignee: Tracker.normalize_assignee(node["assignee"]),
         labels: labels,
         attachments: attachments,
         blocked_by: blockers,
@@ -455,6 +458,7 @@ defmodule Symphony.Tracker do
         state: to_string(node["status"] || node["state"] || ""),
         branch_name: node["gitBranchName"] || node["branchName"],
         url: node["url"],
+        assignee: Tracker.normalize_assignee(node["assignee"] || node["owner"]),
         labels: Enum.map(node["labels"] || [], &(to_string(&1) |> String.downcase())),
         attachments: Tracker.normalize_attachments(node["attachments"]),
         blocked_by: blocked_by,
@@ -724,8 +728,63 @@ defmodule Symphony.Tracker do
 
   def normalize_attachments(_), do: []
 
+  def normalize_assignee(nil), do: nil
+
+  def normalize_assignee(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    if trimmed == "",
+      do: nil,
+      else: %IssueAssignee{name: trimmed, display_name: trimmed, mention: mention_text(trimmed)}
+  end
+
+  def normalize_assignee(value) when is_map(value) do
+    id = maybe_string(map_get(value, "id"))
+    name = maybe_string(map_get(value, "name") || map_get(value, "username"))
+    display_name = maybe_string(map_get(value, "displayName") || map_get(value, "display_name"))
+    email = maybe_string(map_get(value, "email"))
+    url = maybe_string(map_get(value, "url"))
+
+    mention =
+      maybe_string(map_get(value, "mention")) ||
+        mention_text(
+          map_get(value, "handle") || map_get(value, "username") || display_name || name
+        )
+
+    if Enum.any?([id, name, display_name, email, url, mention], &(!is_nil(&1))) do
+      %IssueAssignee{
+        id: id,
+        name: name,
+        display_name: display_name,
+        email: email,
+        url: url,
+        mention: mention
+      }
+    end
+  end
+
+  def normalize_assignee(_), do: nil
+
   defp maybe_string(nil), do: nil
   defp maybe_string(value), do: to_string(value)
+
+  defp mention_text(nil), do: nil
+
+  defp mention_text(value) do
+    text = String.trim(to_string(value))
+
+    cond do
+      text == "" -> nil
+      String.starts_with?(text, "@") -> text
+      true -> "@#{text}"
+    end
+  end
+
+  defp map_get(map, key) when is_map(map) do
+    Map.get(map, key) || Map.get(map, String.to_existing_atom(key))
+  rescue
+    ArgumentError -> nil
+  end
 
   def make_tracker(%TrackerConfig{kind: "linear_mcp"} = config),
     do: %LinearMcpClient{config: config}

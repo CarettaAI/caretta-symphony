@@ -7,6 +7,7 @@ defmodule Symphony.ReviewTest do
   alias Symphony.Review.{
     PullRequestInfo,
     PullRequestRef,
+    ReviewFeedbackItem,
     ReviewPullRequestResolver,
     ReviewMergeResult
   }
@@ -167,5 +168,105 @@ defmodule Symphony.ReviewTest do
 
     refute result.ready
     assert ReviewMergeResult.reason(result) == "no required PRs were found"
+  end
+
+  test "feedback snapshot filters bots workpads and blank reviews" do
+    comments = [
+      %{
+        "id" => "linear-1",
+        "body" => "Please handle the empty state.",
+        "createdAt" => "2026-04-29T10:00:00Z",
+        "user" => %{"login" => "omar", "type" => "User"}
+      },
+      %{
+        "id" => "linear-2",
+        "body" => "## Codex Workpad\nupdated",
+        "createdAt" => "2026-04-29T10:01:00Z",
+        "user" => %{"login" => "codex-agent", "type" => "Bot"}
+      }
+    ]
+
+    pr_feedback = [
+      %ReviewFeedbackItem{
+        source: "github_pr_comment",
+        id: "pr-comment-1",
+        body: "Automated check passed.",
+        author: "ci-bot",
+        author_type: "Bot",
+        updated_at: ~U[2026-04-29 10:02:00Z]
+      },
+      %ReviewFeedbackItem{
+        source: "github_pr_review",
+        id: "review-1",
+        body: "",
+        author: "human",
+        author_type: "User",
+        updated_at: ~U[2026-04-29 10:03:00Z]
+      }
+    ]
+
+    snapshot = Review.feedback_snapshot(comments, pr_feedback)
+
+    assert Enum.map(snapshot.items, & &1.id) == ["linear_comment:linear-1"]
+    assert snapshot.latest_feedback_at == ~U[2026-04-29 10:00:00Z]
+  end
+
+  test "feedback fingerprint changes when human feedback changes" do
+    first =
+      Review.feedback_snapshot(
+        [%{"id" => "1", "body" => "First", "createdAt" => "2026-04-29T10:00:00Z"}],
+        []
+      )
+
+    second =
+      Review.feedback_snapshot(
+        [%{"id" => "1", "body" => "Second", "updatedAt" => "2026-04-29T10:05:00Z"}],
+        []
+      )
+
+    assert first.fingerprint != second.fingerprint
+    assert second.latest_feedback_at == ~U[2026-04-29 10:05:00Z]
+  end
+
+  test "PR feedback payloads normalize review comment metadata" do
+    ref = %PullRequestRef{owner: "ExampleOrg", repo: "app", number: 12}
+
+    item =
+      Review.pr_feedback_item_from_payload(ref, "github_pr_review_comment", %{
+        "id" => 99,
+        "body" => "This branch needs the same validation as the API PR.",
+        "html_url" => "https://github.com/ExampleOrg/app/pull/12#discussion_r99",
+        "created_at" => "2026-04-29T11:00:00Z",
+        "user" => %{"login" => "reviewer", "type" => "User"}
+      })
+
+    assert item.id == "ExampleOrg/app#12:github_pr_review_comment:99"
+    assert item.author == "reviewer"
+    assert item.updated_at == ~U[2026-04-29 11:00:00Z]
+    assert Review.human_feedback_item?(item)
+  end
+
+  test "blank approving reviews are ignored but blank request-changes reviews count" do
+    ref = %PullRequestRef{owner: "ExampleOrg", repo: "app", number: 12}
+
+    approval =
+      Review.pr_feedback_item_from_payload(ref, "github_pr_review", %{
+        "id" => 1,
+        "body" => "",
+        "state" => "APPROVED",
+        "user" => %{"login" => "reviewer", "type" => "User"}
+      })
+
+    changes =
+      Review.pr_feedback_item_from_payload(ref, "github_pr_review", %{
+        "id" => 2,
+        "body" => "",
+        "state" => "CHANGES_REQUESTED",
+        "user" => %{"login" => "reviewer", "type" => "User"}
+      })
+
+    refute Review.human_feedback_item?(approval)
+    assert Review.human_feedback_item?(changes)
+    assert changes.body == "Review state: CHANGES_REQUESTED"
   end
 end

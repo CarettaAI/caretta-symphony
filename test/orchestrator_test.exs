@@ -11,9 +11,11 @@ defmodule Symphony.OrchestratorTest do
     BlockerRef,
     CompletedEntry,
     Issue,
+    IssueAssignee,
     IssueAttachment,
     RepoPlan,
     RepoPlanItem,
+    ReviewFeedbackState,
     RetryEntry,
     RunningEntry
   }
@@ -351,6 +353,121 @@ defmodule Symphony.OrchestratorTest do
   end
 
   @tag :tmp_dir
+  test "blocked worker results escalate to Linear assignee", %{tmp_dir: tmp_dir} do
+    parent = self()
+
+    tracker = %{
+      list_issue_comments: fn "ABC-1" ->
+        send(parent, :list_comments)
+        []
+      end,
+      save_issue_comment: fn "ABC-1", body, opts ->
+        send(parent, {:save_comment, body, opts})
+        %{"id" => "comment-1"}
+      end
+    }
+
+    orchestrator =
+      make_manager(tmp_dir)
+      |> Orchestrator.new()
+      |> Map.put(:tracker_factory, fn _ -> tracker end)
+
+    issue = %Issue{
+      id: "1",
+      identifier: "ABC-1",
+      title: "Ready",
+      state: "In Progress",
+      labels: ["codex"],
+      assignee: %IssueAssignee{display_name: "Omar", mention: "@omar"}
+    }
+
+    entry = %RunningEntry{
+      issue: issue,
+      workspace_path: tmp_dir,
+      started_at: Utils.now_utc(),
+      started_monotonic: System.monotonic_time(:millisecond)
+    }
+
+    orchestrator = put_in(orchestrator.state.running[issue.id], entry)
+
+    orchestrator =
+      Orchestrator.handle_worker_done(orchestrator, issue.id, %AgentRunResult{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        blocked: true,
+        reason: "missing production credentials"
+      })
+
+    assert_received :list_comments
+    assert_received {:save_comment, body, []}
+    assert body =~ "## Symphony Blocked Escalation"
+    assert body =~ "@omar"
+    assert body =~ "missing production credentials"
+    assert body =~ "After a human reply"
+
+    blocked = orchestrator.state.blocked[issue.id]
+    assert blocked.escalation_comment_id == "comment-1"
+    assert blocked.escalation_at
+    assert is_binary(blocked.escalation_fingerprint)
+  end
+
+  @tag :tmp_dir
+  test "blocked issues are released when a human responds after escalation", %{tmp_dir: tmp_dir} do
+    orchestrator = Orchestrator.new(make_manager(tmp_dir))
+    {_, _, config} = ConfigManager.current(orchestrator.config_manager)
+    blocked_at = ~U[2026-04-30 12:00:00Z]
+
+    issue = %Issue{
+      id: "1",
+      identifier: "ABC-1",
+      title: "Ready",
+      state: "In Progress",
+      labels: ["codex"]
+    }
+
+    blocked = %BlockedEntry{
+      issue: issue,
+      reason: "needs product decision",
+      blocked_at: blocked_at,
+      escalation_comment_id: "comment-1"
+    }
+
+    tracker = %{
+      list_issue_comments: fn "ABC-1" ->
+        [
+          %{
+            "id" => "comment-1",
+            "body" => "## Symphony Blocked Escalation\nold",
+            "createdAt" => "2026-04-30T12:01:00Z",
+            "author" => %{"name" => "Symphony", "type" => "bot"}
+          },
+          %{
+            "id" => "comment-2",
+            "body" => "Use caretta-webapp for this.",
+            "createdAt" => "2026-04-30T12:02:00Z",
+            "author" => %{"name" => "Omar"}
+          }
+        ]
+      end
+    }
+
+    orchestrator = %{
+      orchestrator
+      | state: %{
+          orchestrator.state
+          | blocked: %{issue.id => blocked},
+            claimed: MapSet.new([issue.id])
+        }
+    }
+
+    orchestrator =
+      Orchestrator.reconcile_blocked_issues(orchestrator, [issue], config, tracker: tracker)
+
+    refute Map.has_key?(orchestrator.state.blocked, issue.id)
+    refute MapSet.member?(orchestrator.state.claimed, issue.id)
+  end
+
+  @tag :tmp_dir
   test "review reconciliation moves done only after all PRs merged", %{tmp_dir: tmp_dir} do
     parent = self()
 
@@ -429,6 +546,278 @@ defmodule Symphony.OrchestratorTest do
     Orchestrator.reconcile_review_issues(orchestrator, %StructTracker{parent: self()}, config)
 
     assert_received {:struct_tracker_fetch_issues_by_states, ["In Review", "Merging"]}
+  end
+
+  @tag :tmp_dir
+  test "review reconciliation baselines then moves to rework for new Linear feedback", %{
+    tmp_dir: tmp_dir
+  } do
+    parent = self()
+
+    issue = %Issue{
+      id: "ABC-1",
+      identifier: "ABC-1",
+      title: "Ready",
+      state: "In Review",
+      labels: ["codex"]
+    }
+
+    tracker = fn comments ->
+      %{
+        fetch_issues_by_states: fn ["In Review", "Merging"] -> [issue] end,
+        fetch_issue_states_by_ids: fn ["ABC-1"] -> [issue] end,
+        list_issue_comments: fn "ABC-1" -> comments end,
+        save_issue_state: fn issue_id, state ->
+          send(parent, {:saved_state, issue_id, state})
+          %{"id" => issue_id, "state" => state}
+        end
+      }
+    end
+
+    resolver = %{
+      evaluate: fn _issue, _opts -> %ReviewMergeResult{ready: false, required_prs: []} end
+    }
+
+    orchestrator = Orchestrator.new(make_manager(tmp_dir), review_resolver: resolver)
+    {_, _, config} = ConfigManager.current(orchestrator.config_manager)
+
+    first = [
+      %{"id" => "1", "body" => "Initial review note", "createdAt" => "2026-04-29T10:00:00Z"}
+    ]
+
+    orchestrator = Orchestrator.reconcile_review_issues(orchestrator, tracker.(first), config)
+
+    refute_received {:saved_state, "ABC-1", _}
+    assert orchestrator.state.review_feedback["ABC-1"].fingerprint
+    refute orchestrator.state.review_feedback["ABC-1"].last_triggered_at
+
+    second =
+      first ++
+        [
+          %{
+            "id" => "2",
+            "body" => "Please update the empty state.",
+            "createdAt" => "2026-04-29T10:05:00Z"
+          }
+        ]
+
+    orchestrator = Orchestrator.reconcile_review_issues(orchestrator, tracker.(second), config)
+
+    assert_received {:saved_state, "ABC-1", "Rework"}
+    assert orchestrator.state.review_feedback["ABC-1"].last_triggered_at
+  end
+
+  @tag :tmp_dir
+  test "review reconciliation moves to rework for new PR feedback", %{tmp_dir: tmp_dir} do
+    parent = self()
+
+    ref = %PullRequestRef{owner: "ExampleOrg", repo: "app", number: 1}
+
+    pr = %PullRequestInfo{
+      ref: ref,
+      url: "https://github.com/ExampleOrg/app/pull/1",
+      state: "OPEN",
+      base_ref_name: "dev"
+    }
+
+    issue = %Issue{
+      id: "ABC-1",
+      identifier: "ABC-1",
+      title: "Ready",
+      state: "In Review",
+      labels: ["codex"],
+      attachments: [%IssueAttachment{url: pr.url}]
+    }
+
+    tracker = %{
+      fetch_issues_by_states: fn ["In Review", "Merging"] -> [issue] end,
+      fetch_issue_states_by_ids: fn ["ABC-1"] -> [issue] end,
+      list_issue_comments: fn "ABC-1" -> [] end,
+      save_issue_state: fn issue_id, state ->
+        send(parent, {:saved_state, issue_id, state})
+        %{"id" => issue_id, "state" => state}
+      end
+    }
+
+    inspector = fn feedback ->
+      %{
+        view_pr_url: fn _url -> pr end,
+        view_pr_ref: fn _ref -> nil end,
+        list_prs_for_branch: fn _repo, _branch, _base -> [] end,
+        list_pr_feedback: fn _ref -> feedback end
+      }
+    end
+
+    orchestrator =
+      Orchestrator.new(make_manager(tmp_dir),
+        review_resolver: Symphony.Review.ReviewPullRequestResolver.new(inspector.([]))
+      )
+
+    {_, _, config} = ConfigManager.current(orchestrator.config_manager)
+    orchestrator = Orchestrator.reconcile_review_issues(orchestrator, tracker, config)
+    refute_received {:saved_state, "ABC-1", _}
+
+    feedback = [
+      %Symphony.Review.ReviewFeedbackItem{
+        source: "github_pr_review_comment",
+        id: "ExampleOrg/app#1:github_pr_review_comment:1",
+        author: "reviewer",
+        author_type: "User",
+        body: "Please cover this branch in the tests.",
+        updated_at: ~U[2026-04-29 10:10:00Z]
+      }
+    ]
+
+    orchestrator = %{
+      orchestrator
+      | review_resolver: Symphony.Review.ReviewPullRequestResolver.new(inspector.(feedback))
+    }
+
+    Orchestrator.reconcile_review_issues(orchestrator, tracker, config)
+
+    assert_received {:saved_state, "ABC-1", "Rework"}
+  end
+
+  @tag :tmp_dir
+  test "review reconciliation ignores bot and workpad feedback", %{tmp_dir: tmp_dir} do
+    parent = self()
+
+    issue = %Issue{
+      id: "ABC-1",
+      identifier: "ABC-1",
+      title: "Ready",
+      state: "In Review",
+      labels: ["codex"]
+    }
+
+    tracker = fn comments ->
+      %{
+        fetch_issues_by_states: fn ["In Review", "Merging"] -> [issue] end,
+        fetch_issue_states_by_ids: fn ["ABC-1"] -> [issue] end,
+        list_issue_comments: fn "ABC-1" -> comments end,
+        save_issue_state: fn issue_id, state ->
+          send(parent, {:saved_state, issue_id, state})
+          %{"id" => issue_id, "state" => state}
+        end
+      }
+    end
+
+    resolver = %{
+      evaluate: fn _issue, _opts -> %ReviewMergeResult{ready: false, required_prs: []} end
+    }
+
+    orchestrator = Orchestrator.new(make_manager(tmp_dir), review_resolver: resolver)
+    {_, _, config} = ConfigManager.current(orchestrator.config_manager)
+    orchestrator = Orchestrator.reconcile_review_issues(orchestrator, tracker.([]), config)
+
+    comments = [
+      %{
+        "id" => "bot",
+        "body" => "Automated result",
+        "user" => %{"login" => "ci-bot", "type" => "Bot"},
+        "createdAt" => "2026-04-29T10:00:00Z"
+      },
+      %{"id" => "workpad", "body" => "## Codex Workpad\nupdated"}
+    ]
+
+    Orchestrator.reconcile_review_issues(orchestrator, tracker.(comments), config)
+
+    refute_received {:saved_state, "ABC-1", _}
+  end
+
+  @tag :tmp_dir
+  test "review reconciliation still moves done when feedback is unchanged", %{tmp_dir: tmp_dir} do
+    parent = self()
+
+    comment = %{
+      "id" => "1",
+      "body" => "Looks good after the latest fix.",
+      "createdAt" => "2026-04-29T10:00:00Z"
+    }
+
+    snapshot = Symphony.Review.feedback_snapshot([comment], [])
+
+    issue = %Issue{
+      id: "ABC-1",
+      identifier: "ABC-1",
+      title: "Ready",
+      state: "In Review",
+      labels: ["codex"]
+    }
+
+    tracker = %{
+      fetch_issues_by_states: fn ["In Review", "Merging"] -> [issue] end,
+      fetch_issue_states_by_ids: fn ["ABC-1"] -> [issue] end,
+      list_issue_comments: fn "ABC-1" -> [comment] end,
+      save_issue_state: fn issue_id, state ->
+        send(parent, {:saved_state, issue_id, state})
+        %{"id" => issue_id, "state" => state}
+      end
+    }
+
+    resolver = %{evaluate: fn _issue, _opts -> %ReviewMergeResult{ready: true} end}
+    orchestrator = Orchestrator.new(make_manager(tmp_dir), review_resolver: resolver)
+
+    orchestrator = %{
+      orchestrator
+      | state: %{
+          orchestrator.state
+          | review_feedback: %{
+              issue.id => %ReviewFeedbackState{
+                issue_id: issue.id,
+                identifier: issue.identifier,
+                fingerprint: snapshot.fingerprint,
+                latest_feedback_at: snapshot.latest_feedback_at
+              }
+            }
+        }
+    }
+
+    {_, _, config} = ConfigManager.current(orchestrator.config_manager)
+    Orchestrator.reconcile_review_issues(orchestrator, tracker, config)
+
+    assert_received {:saved_state, "ABC-1", "Done"}
+    refute_received {:saved_state, "ABC-1", "Rework"}
+  end
+
+  @tag :tmp_dir
+  test "review feedback state persists across restart", %{tmp_dir: tmp_dir} do
+    issue = %Issue{
+      id: "ABC-1",
+      identifier: "ABC-1",
+      title: "Ready",
+      state: "In Review",
+      labels: ["codex"]
+    }
+
+    tracker = %{
+      fetch_issues_by_states: fn ["In Review", "Merging"] -> [issue] end,
+      fetch_issue_states_by_ids: fn ["ABC-1"] -> [issue] end,
+      list_issue_comments: fn "ABC-1" ->
+        [
+          %{
+            "id" => "1",
+            "body" => "Keep the compact variant.",
+            "createdAt" => "2026-04-29T10:00:00Z"
+          }
+        ]
+      end,
+      save_issue_state: fn issue_id, state -> %{"id" => issue_id, "state" => state} end
+    }
+
+    resolver = %{
+      evaluate: fn _issue, _opts -> %ReviewMergeResult{ready: false, required_prs: []} end
+    }
+
+    manager = make_manager(tmp_dir)
+    orchestrator = Orchestrator.new(manager, review_resolver: resolver)
+    {_, _, config} = ConfigManager.current(orchestrator.config_manager)
+    orchestrator = Orchestrator.reconcile_review_issues(orchestrator, tracker, config)
+
+    loaded = Orchestrator.new(make_manager(tmp_dir))
+
+    assert loaded.state.review_feedback["ABC-1"].fingerprint ==
+             orchestrator.state.review_feedback["ABC-1"].fingerprint
   end
 
   @tag :tmp_dir

@@ -6,8 +6,11 @@ tracker:
   terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
   review_states: ["In Review", "Merging"]
   handoff_state: In Review
+  rework_state: Rework
   done_state: Done
   merge_base_branch: dev
+  blocked_escalation_enabled: true
+  blocked_escalation_mentions: ["@operator"]
   required_labels: ["codex"]
   mcp_command: /Applications/Codex.app/Contents/Resources/codex app-server
   mcp_server: codex_apps
@@ -27,6 +30,31 @@ codex:
     networkAccess: true
 server:
   port: 8765
+self_healing:
+  enabled: false
+  base_branch: main
+  branch_prefix: codex/self-heal
+  workspace_root: ./.symphony-self-heal
+  stale_poll_ms: 120000
+  cooldown_ms: 900000
+  max_attempts: 3
+  validation_commands:
+    - mix format --check-formatted
+    - mix test
+    - mix escript.build
+  codex:
+    command: /Applications/Codex.app/Contents/Resources/codex app-server
+    model: gpt-5.5
+    effort: xhigh
+    approval_policy: never
+    thread_sandbox: workspace-write
+    turn_sandbox_policy:
+      type: workspaceWrite
+      networkAccess: true
+  restart:
+    tmux_session: symphony-elixir
+    port: 8765
+    workflow_path: ./WORKFLOW.md
 context:
   coding:
     enabled: true
