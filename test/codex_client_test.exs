@@ -110,6 +110,95 @@ defmodule Symphony.CodexClientTest do
   end
 
   @tag :tmp_dir
+  test "Codex JSONL client declines MCP elicitation in non-interactive mode", %{
+    tmp_dir: tmp_dir
+  } do
+    fake_server = Path.join(tmp_dir, "fake_app_server.py")
+
+    File.write!(fake_server, ~S"""
+    import json
+    import sys
+
+    thread_id = "thr_elicitation"
+    turn_id = "turn_elicitation"
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        if method == "initialize":
+            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+        elif method == "initialized":
+            pass
+        elif method == "thread/start":
+            print(json.dumps({"id": msg["id"], "result": {"thread": {"id": thread_id}}}), flush=True)
+        elif method == "turn/start":
+            print(json.dumps({"id": msg["id"], "result": {"turn": {"id": turn_id}}}), flush=True)
+            print(json.dumps({"id": 113, "method": "mcpServer/elicitation/request", "params": {"threadId": thread_id, "turnId": turn_id, "message": "Need operator input"}}), flush=True)
+        elif msg.get("id") == 113:
+            assert msg["result"]["action"] == "decline"
+            print(json.dumps({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed"}}}), flush=True)
+    """)
+
+    parent = self()
+
+    session =
+      CodexClient.start_session(%CodexConfig{command: "python3 #{fake_server}"}, tmp_dir,
+        tracker_config: nil,
+        on_event: fn event -> send(parent, {:event, event}) end
+      )
+
+    {result, session} = CodexClient.run_turn(session, "decline")
+    CodexClient.stop_session(session)
+
+    assert result.status == "completed"
+    assert_receive {:event, %{"event" => "mcp_elicitation_declined", "action" => "decline"}}
+  end
+
+  @tag :tmp_dir
+  test "Codex JSONL client ignores non-protocol stderr diagnostics", %{tmp_dir: tmp_dir} do
+    fake_server = Path.join(tmp_dir, "fake_app_server.py")
+
+    File.write!(fake_server, ~S"""
+    import json
+    import sys
+
+    thread_id = "thr_stderr"
+    turn_id = "turn_stderr"
+
+    def log():
+        sys.stderr.write("\x1b[31mERROR\x1b[0m codex_app_server::message_processor <- diagnostic only\n")
+        sys.stderr.flush()
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        if method == "initialize":
+            log()
+            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+        elif method == "initialized":
+            pass
+        elif method == "thread/start":
+            log()
+            print(json.dumps({"id": msg["id"], "result": {"thread": {"id": thread_id}}}), flush=True)
+        elif method == "turn/start":
+            log()
+            print(json.dumps({"id": msg["id"], "result": {"turn": {"id": turn_id}}}), flush=True)
+            print(json.dumps({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed"}}}), flush=True)
+    """)
+
+    session =
+      CodexClient.start_session(%CodexConfig{command: "python3 #{fake_server}"}, tmp_dir,
+        tracker_config: nil,
+        on_event: fn _ -> :ok end
+      )
+
+    {result, session} = CodexClient.run_turn(session, "stderr")
+    CodexClient.stop_session(session)
+
+    assert result.status == "completed"
+  end
+
+  @tag :tmp_dir
   test "Codex JSONL client accepts dynamic tool name alias", %{tmp_dir: tmp_dir} do
     fake_server = Path.join(tmp_dir, "fake_app_server.py")
 

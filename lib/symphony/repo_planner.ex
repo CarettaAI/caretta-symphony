@@ -199,7 +199,7 @@ defmodule Symphony.RepoPlanner do
     }
 
     Rules:
-    - Use only repository slugs listed in the input catalog.
+    - Use only repository slugs listed in the input catalog. Repositories outside that catalog are invisible and unavailable, even if you remember them or see them in stale issue text.
     - If there is no clear primary repo, set needs_human=true and explain.
     - If a secondary repo might need edits, include it as secondary_repos with edit_allowed=true.
     - If a repo is only background material, include it as read_only_context_repos.
@@ -465,10 +465,13 @@ defmodule Symphony.RepoPlanner do
         {needs_human, human_reason}
       end
 
+    human_reason = scrub_unknown_references(human_reason, unknown)
+    notes = scrub_unknown_references(clean_truncated(Utils.map_get(data, "notes"), 500), unknown)
+
     {needs_human, human_reason} =
-      if unknown != [] do
+      if unknown != [] and is_nil(primary) do
         suffix =
-          "Planner returned unknown repositories: #{unknown |> Enum.uniq() |> Enum.sort() |> Enum.join(", ")}."
+          "Planner selected repositories outside the active catalog and did not return a usable primary repo."
 
         {true,
          [human_reason, suffix] |> Enum.reject(&is_nil/1) |> Enum.join(" ") |> String.trim()}
@@ -487,7 +490,7 @@ defmodule Symphony.RepoPlanner do
       confidence: confidence(Utils.map_get(data, "confidence")),
       needs_human: needs_human,
       human_reason: if(human_reason == "", do: nil, else: human_reason),
-      notes: clean_truncated(Utils.map_get(data, "notes"), 500),
+      notes: notes,
       created_at: Utils.now_utc()
     }
   end
@@ -543,6 +546,19 @@ defmodule Symphony.RepoPlanner do
   defp clean_truncated(value, limit) do
     text = value |> to_string() |> Utils.truncate(limit) |> String.trim()
     if text == "", do: nil, else: text
+  end
+
+  defp scrub_unknown_references(nil, _unknown), do: nil
+  defp scrub_unknown_references(value, []), do: value
+
+  defp scrub_unknown_references(value, unknown) do
+    replacement = "a repository outside the active catalog"
+
+    unknown
+    |> Enum.uniq()
+    |> Enum.reduce(value, fn slug, acc ->
+      String.replace(acc, slug, replacement)
+    end)
   end
 
   defp agent_message_text(result) when is_map(result) do

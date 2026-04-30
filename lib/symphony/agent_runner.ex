@@ -330,7 +330,7 @@ defmodule Symphony.AgentRunner do
           issue_id: issue.id,
           issue_identifier: issue.identifier,
           normal: false,
-          reason: to_string(error.code),
+          reason: error_reason(error),
           workspace_path: workspace.path
         }
 
@@ -357,6 +357,12 @@ defmodule Symphony.AgentRunner do
     after
       WorkspaceManager.after_run(workspace_manager, workspace.path)
     end
+  end
+
+  defp error_reason(%Symphony.Error{} = error) do
+    error
+    |> Exception.message()
+    |> Utils.truncate(1000)
   end
 
   defp run_turn_loop(session, tracker, issue, first_prompt, config, workspace_path, repo_plan) do

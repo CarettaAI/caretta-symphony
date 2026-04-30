@@ -298,4 +298,39 @@ defmodule Symphony.TrackerTest do
              "state" => "completed"
            }) == %{"ok" => true}
   end
+
+  @tag :tmp_dir
+  test "Codex MCP gateway declines elicitation requests", %{tmp_dir: tmp_dir} do
+    fake_server = Path.join(tmp_dir, "fake_app_server.py")
+
+    File.write!(fake_server, ~S"""
+    import json
+    import sys
+
+    call_request_id = None
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        if method == "initialize":
+            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+        elif method == "initialized":
+            pass
+        elif method == "thread/start":
+            print(json.dumps({"id": msg["id"], "result": {"thread": {"id": "thr_1"}}}), flush=True)
+        elif method == "mcpServer/tool/call":
+            call_request_id = msg["id"]
+            print(json.dumps({"id": 111, "method": "mcpServer/elicitation/request", "params": {"message": "Need input"}}), flush=True)
+        elif msg.get("id") == 111:
+            assert msg["result"]["action"] == "decline"
+            print(json.dumps({"id": call_request_id, "result": {"content": [{"type": "text", "text": "{\"ok\": true}"}], "isError": False}}), flush=True)
+    """)
+
+    gateway = %CodexMcpGateway{command: "python3 #{fake_server}", cwd: tmp_dir}
+
+    assert CodexMcpGateway.call_tool(gateway, "linear mcp server_save_issue", %{
+             "id" => "ENG-1",
+             "state" => "completed"
+           }) == %{"ok" => true}
+  end
 end

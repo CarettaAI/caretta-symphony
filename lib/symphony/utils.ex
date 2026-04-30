@@ -6,9 +6,13 @@ defmodule Symphony.Utils do
 
   @jsonl_read_limit_bytes 10 * 1024 * 1024 + 1
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
+  @non_interactive_mcp_elicitation_action "decline"
 
   def jsonl_read_limit_bytes, do: @jsonl_read_limit_bytes
   def non_interactive_tool_input_answer, do: @non_interactive_tool_input_answer
+
+  def non_interactive_mcp_elicitation_result,
+    do: %{"action" => @non_interactive_mcp_elicitation_action}
 
   def now_utc do
     DateTime.utc_now()

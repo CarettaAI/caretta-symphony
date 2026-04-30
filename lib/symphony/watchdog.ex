@@ -5,6 +5,44 @@ defmodule Symphony.Watchdog do
   alias Symphony.SelfHeal
   alias Symphony.Utils
 
+  @service_retry_attempt_threshold 3
+
+  @service_retry_markers [
+    "response_error",
+    "response_timeout",
+    "port_exit",
+    "app-server",
+    "thread/start",
+    "turn/start",
+    "turn_aborted",
+    "turn was interrupted",
+    "user rejected mcp tool call",
+    "linear mcp",
+    "mcp tool",
+    "missing_auth",
+    "unsupported server request",
+    "rate limit",
+    "rate_limits"
+  ]
+
+  @out_of_scope_retry_markers [
+    "repo_plan_needs_human",
+    "repo plan",
+    "read-only repo",
+    "read only repo",
+    "guardrail",
+    "validation failed",
+    "test failed",
+    "lint failed",
+    "typecheck failed",
+    "npm test",
+    "mix test",
+    "hook_failed",
+    "repo_clone_failed",
+    "repo_base_fetch_failed",
+    "repo_branch_checkout_failed"
+  ]
+
   def run(manager_or_config, opts \\ [])
 
   def run(%ConfigManager{} = manager, opts) do
@@ -78,6 +116,9 @@ defmodule Symphony.Watchdog do
 
       stale_poll?(service, config.self_healing.stale_poll_ms, now) ->
         {:trigger, stale_reason(service, config.self_healing.stale_poll_ms)}
+
+      reason = retry_health_reason(snapshot) ->
+        {:trigger, reason}
 
       true ->
         :healthy
@@ -172,6 +213,61 @@ defmodule Symphony.Watchdog do
         "unknown"
 
     "Symphony poll state is stale for more than #{stale_poll_ms} ms; last observed poll timestamp=#{observed_at}"
+  end
+
+  defp retry_health_reason(snapshot) do
+    retrying = if is_list(snapshot["retrying"]), do: snapshot["retrying"], else: []
+
+    Enum.find_value(retrying, fn entry ->
+      case classify_retry_entry(entry) do
+        {:service, reason} -> reason
+        _ -> nil
+      end
+    end)
+  end
+
+  defp classify_retry_entry(%{} = entry) do
+    attempt = Utils.to_int(entry["attempt"]) || 0
+    error = entry["error"] |> to_string() |> String.trim()
+    normalized = String.downcase(error)
+
+    cond do
+      entry["kind"] == "continuation" or error == "" ->
+        :not_retry
+
+      attempt < @service_retry_attempt_threshold ->
+        :too_early
+
+      out_of_scope_retry?(normalized) ->
+        :out_of_scope
+
+      service_retry?(normalized) ->
+        {:service, service_retry_reason(entry, error, attempt)}
+
+      true ->
+        :out_of_scope
+    end
+  end
+
+  defp classify_retry_entry(_entry), do: :out_of_scope
+
+  defp service_retry?(normalized) do
+    Enum.any?(@service_retry_markers, &String.contains?(normalized, &1))
+  end
+
+  defp out_of_scope_retry?(normalized) do
+    Enum.any?(@out_of_scope_retry_markers, &String.contains?(normalized, &1))
+  end
+
+  defp service_retry_reason(entry, error, attempt) do
+    label =
+      [entry["issue_identifier"], entry["title"]]
+      |> Enum.reject(&(is_nil(&1) or to_string(&1) == ""))
+      |> Enum.join(" · ")
+
+    label = if label == "", do: to_string(entry["issue_id"] || "unknown issue"), else: label
+
+    "Symphony job health is degraded: #{label} has retried #{attempt} time(s) with service-scoped error #{inspect(error)}. This is within self-healing scope because the failure is in the Codex/Linear/app-server control plane, not the target product repository."
   end
 
   defp age_ms(%DateTime{} = timestamp, %DateTime{} = now),

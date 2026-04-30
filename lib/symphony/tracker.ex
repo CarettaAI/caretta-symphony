@@ -660,6 +660,12 @@ defmodule Symphony.Tracker do
             })
           end
 
+        method in ["mcpServer/elicitation/request", "elicitation/request"] ->
+          send_message(gateway, %{
+            "id" => request_id,
+            "result" => Utils.non_interactive_mcp_elicitation_result()
+          })
+
         true ->
           send_message(gateway, %{
             "id" => request_id,

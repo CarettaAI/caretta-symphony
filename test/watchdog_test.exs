@@ -64,6 +64,60 @@ defmodule Symphony.WatchdogTest do
              )
   end
 
+  test "classifies repeated service-scoped retry failures as a self-heal trigger" do
+    config = config(stale_poll_ms: 120_000)
+
+    assert {:trigger, reason} =
+             Watchdog.classify_state(
+               %{
+                 "service" => %{
+                   "status" => "running",
+                   "last_poll_completed_at" => "2026-04-30T11:59:30Z"
+                 },
+                 "retrying" => [
+                   %{
+                     "issue_identifier" => "CRTTA-284",
+                     "title" => "Keep the force-insight button in the notch",
+                     "kind" => "retry",
+                     "attempt" => 4,
+                     "error" => "response_error: user rejected MCP tool call"
+                   }
+                 ]
+               },
+               config,
+               now()
+             )
+
+    assert reason =~ "job health"
+    assert reason =~ "CRTTA-284"
+    assert reason =~ "self-healing scope"
+  end
+
+  test "does not self-heal repeated target-repo validation failures" do
+    config = config(stale_poll_ms: 120_000)
+
+    assert :healthy =
+             Watchdog.classify_state(
+               %{
+                 "service" => %{
+                   "status" => "running",
+                   "last_poll_completed_at" => "2026-04-30T11:59:30Z"
+                 },
+                 "retrying" => [
+                   %{
+                     "issue_identifier" => "CRTTA-999",
+                     "title" => "Fix product test",
+                     "kind" => "retry",
+                     "attempt" => 8,
+                     "error" => "validation failed: npm test failed"
+                   }
+                 ]
+               },
+               config,
+               now()
+             )
+  end
+
   test "run_once dispatches self-heal with trigger reason" do
     config = config(stale_poll_ms: 120_000)
     test_pid = self()
