@@ -209,6 +209,8 @@ Useful commands:
 
 On macOS, `scripts/symphony-managed.sh` and `launchd/com.caretta.symphony.watchdog.plist` provide a launcher path that goes through `/bin/zsh -lc`, which avoids direct launchd escript startup failures.
 
+The managed launcher resolves the executable in this order: `SYMPHONY_EXECUTABLE`, the validated self-heal deployment at `.symphony-self-heal/deploy/current/symphony`, then the local `./symphony` build artifact. It fails before invoking escript if none of those paths is executable, so generated build artifacts are never assumed to exist after checkout or cleanup.
+
 ## Status API
 
 When `server.port` is set, Symphony exposes:

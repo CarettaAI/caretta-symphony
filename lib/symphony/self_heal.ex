@@ -1,6 +1,8 @@
 defmodule Symphony.SelfHeal do
   @moduledoc false
 
+  import Bitwise, only: [band: 2]
+
   alias Symphony.CodexClient
   alias Symphony.Config.{ConfigManager, ServiceConfig, SelfHealingConfig}
   alias Symphony.Utils
@@ -83,21 +85,33 @@ defmodule Symphony.SelfHeal do
     session = self_healing.tmux_session
     port = self_healing.restart_port
 
-    managed_command =
-      "cd #{shell(repo_root)} && exec #{shell(artifact)} #{shell(workflow_path)} --port #{port}"
+    if executable_artifact?(artifact) do
+      managed_command =
+        "cd #{shell(repo_root)} && exec #{shell(artifact)} #{shell(workflow_path)} --port #{port}"
 
-    commands = [
-      "tmux has-session -t #{shell(session)} 2>/dev/null && tmux kill-session -t #{shell(session)} || true",
-      "pids=$(lsof -tiTCP:#{port} -sTCP:LISTEN 2>/dev/null || true); if [ -n \"$pids\" ]; then kill $pids 2>/dev/null || true; fi",
-      "tmux new-session -d -s #{shell(session)} #{shell(managed_command)}"
-    ]
+      commands = [
+        "tmux has-session -t #{shell(session)} 2>/dev/null && tmux kill-session -t #{shell(session)} || true",
+        "pids=$(lsof -tiTCP:#{port} -sTCP:LISTEN 2>/dev/null || true); if [ -n \"$pids\" ]; then kill $pids 2>/dev/null || true; fi",
+        "tmux new-session -d -s #{shell(session)} #{shell(managed_command)}"
+      ]
 
-    results = Enum.map(commands, &run_shell(&1, repo_root, opts))
+      results = Enum.map(commands, &run_shell(&1, repo_root, opts))
 
-    if Enum.all?(results, &(&1.status == 0)) do
-      {:ok, results}
+      if Enum.all?(results, &(&1.status == 0)) do
+        {:ok, results}
+      else
+        {:error, results}
+      end
     else
-      {:error, results}
+      {:error,
+       [
+         %CommandResult{
+           command: "preflight managed Symphony artifact",
+           cwd: repo_root,
+           output: "managed restart requires an executable Symphony artifact at #{artifact}",
+           status: 1
+         }
+       ]}
     end
   end
 
@@ -553,6 +567,13 @@ defmodule Symphony.SelfHeal do
 
   defp repo_root(%ServiceConfig{} = config),
     do: config.workflow_path |> Path.dirname() |> Path.expand()
+
+  defp executable_artifact?(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> band(mode, 0o111) != 0
+      _ -> false
+    end
+  end
 
   defp encode_results(results) do
     Enum.map(results, fn result ->
