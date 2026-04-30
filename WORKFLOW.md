@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear_mcp
-  team: Platform Automation
+  team: Caretta
   active_states: ["Todo", "In Progress", "Rework", "Merging"]
   terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
   review_states: ["In Review", "Merging"]
@@ -10,7 +10,7 @@ tracker:
   done_state: Done
   merge_base_branch: dev
   blocked_escalation_enabled: true
-  blocked_escalation_mentions: ["@operator"]
+  blocked_escalation_mentions: ["@Omar"]
   required_labels: ["codex"]
   mcp_command: /Applications/Codex.app/Contents/Resources/codex app-server
   mcp_server: codex_apps
@@ -31,7 +31,7 @@ codex:
 server:
   port: 8765
 self_healing:
-  enabled: false
+  enabled: true
   base_branch: main
   branch_prefix: codex/self-heal
   workspace_root: ./.symphony-self-heal
@@ -63,7 +63,7 @@ context:
     classifier_effort: low
     classification_timeout_ms: 120000
     skill_paths:
-      - /opt/symphony/skills/platform-architecture
+      - /Users/omarelamin/.codex/skills/caretta-architecture
     label_triggers: ["codex"]
     keyword_triggers: ["implement", "fix", "bug", "feature", "integration", "UI", "API", "provider", "repo", "code", "web search", "transcription", "chat", "documents", "knowledge base"]
     max_chars: 50000
@@ -82,78 +82,101 @@ repositories:
   block_on_needs_human: true
   quarantine_on_mismatch: true
   clone_timeout_ms: 300000
-  base_branch: dev
+  base_branch: main
   branch_prefix: Symphony
   known:
-    - slug: ExampleOrg/desktop-runtime
-      local_path: /opt/symphony/example-repos/client/desktop-runtime
-      remote_url: https://github.com/ExampleOrg/desktop-runtime.git
-      aliases: ["desktop-runtime", "electron shell", "overlay", "live workflow", "local transcription", "runtime orchestrator"]
-      description: Desktop shell and live in-call runtime; local capture, transcript batching, in-app suggestions, and host-side provider calls. Do not choose this for saved-call history pages, post-call detail tabs, or follow-up email drafts unless the issue explicitly says desktop overlay or live runtime.
-    - slug: ExampleOrg/web-console
-      local_path: /opt/symphony/example-repos/product/web-console
-      remote_url: https://github.com/ExampleOrg/web-console.git
-      aliases: ["web-console", "web app", "Next.js", "onboarding", "settings", "history", "history tab", "post-call", "saved call", "call details", "follow-up email", "email draft", "calendar", "CRM", "in-app assistant"]
-      description: Customer-facing web console, authenticated routes, calendar/CRM settings, saved-call history views, post-call detail tabs, follow-up email drafts/templates, folders, and browser-side gateway proxy.
-    - slug: ExampleOrg/shared-contracts
-      local_path: /opt/symphony/example-repos/libs/shared-contracts
-      aliases: ["shared-contracts", "shared schema", "shared types", "API contracts"]
-      description: Shared contracts, schemas, helpers, and utilities consumed by desktop, web, and worker services.
-    - slug: ExampleOrg/assistant-engine
-      local_path: /opt/symphony/example-repos/services/assistant-engine
-      remote_url: https://github.com/ExampleOrg/assistant-engine.git
-      aliases: ["assistant-engine", "chat runtime", "async agent", "automation", "daily brief", "trusted route"]
-      description: Chat API behavior, async agent workers, automations, prompt composition, and assistant runtime modules.
-    - slug: ExampleOrg/knowledge-service
-      local_path: /opt/symphony/example-repos/services/knowledge-service
-      remote_url: https://github.com/ExampleOrg/knowledge-service.git
-      aliases: ["knowledge-service", "knowledge ingestion", "meeting imports", "CRM import", "org knowledge", "vector sync"]
-      description: Knowledge ingestion service, transcript FAQ extraction, integration ingestion, and organization knowledge upserts.
-    - slug: ExampleOrg/knowledge-docs
-      local_path: /opt/symphony/example-repos/content/knowledge-docs
-      remote_url: https://github.com/ExampleOrg/knowledge-docs.git
-      aliases: ["knowledge-docs", "KB documents", "document packs", "sales playbooks", "RAG eval"]
-      description: Document and knowledge-base tooling; scripts and helpers for building, splitting, evaluating, and uploading product knowledge packs.
-    - slug: ExampleOrg/model-gateway
-      local_path: /opt/symphony/example-repos/platform/model-gateway
-      remote_url: https://github.com/ExampleOrg/model-gateway.git
-      aliases: ["model-gateway", "LLM gateway", "prompt schema", "provider routing", "terraform"]
-      description: Hosted model gateway configuration, prompt/schema files, provider routing, auth, API gateway, and infrastructure code.
-    - slug: ExampleOrg/briefing-api
-      local_path: /opt/symphony/example-repos/services/briefing-api
-      remote_url: https://github.com/ExampleOrg/briefing-api.git
-      aliases: ["briefing-api", "pre-call briefing", "CRM briefing", "web enrichment", "company enrichment"]
-      description: AI-powered call briefings, CRM enrichment, vector retrieval, and external enrichment providers.
-    - slug: ExampleOrg/messaging-app
-      local_path: /opt/symphony/example-repos/integrations/messaging-app
-      remote_url: https://github.com/ExampleOrg/messaging-app.git
-      aliases: ["messaging-app", "Slack app", "OAuth install", "DMs", "events"]
-      description: Messaging integration on serverless functions, install/OAuth, DMs, mentions, events, and scheduling plumbing.
-    - slug: ExampleOrg/ops-dashboard
-      local_path: /opt/symphony/example-repos/ops/dashboard
-      remote_url: https://github.com/ExampleOrg/ops-dashboard.git
-      aliases: ["ops-dashboard", "KPI dashboard", "cohort filters", "reporting"]
-      description: Internal KPI dashboard and server-side reporting queries.
-    - slug: ExampleOrg/metrics-console
-      local_path: /opt/symphony/example-repos/ops/metrics-console
-      remote_url: https://github.com/ExampleOrg/metrics-console.git
-      aliases: ["metrics-console", "Svelte metrics", "metrics app"]
-      description: Lightweight metrics console for operational telemetry and QA sampling.
-    - slug: ExampleOrg/transcript-lab
-      local_path: /opt/symphony/example-repos/tools/transcript-lab
-      remote_url: https://github.com/ExampleOrg/transcript-lab.git
-      aliases: ["transcript-lab", "transcript viewer", "insight viewer"]
-      description: Tooling for inspecting insight and transcript behavior, not production runtime changes.
-    - slug: ExampleOrg/speech-ingress
-      local_path: /opt/symphony/example-repos/services/speech-ingress
-      remote_url: https://github.com/ExampleOrg/speech-ingress.git
-      aliases: ["speech-ingress", "ASR ingress", "remote ASR"]
-      description: Speech ingress and hosted recognition service behavior.
-    - slug: ExampleOrg/transcription-proxy
-      local_path: /opt/symphony/example-repos/services/transcription-proxy
-      remote_url: https://github.com/ExampleOrg/transcription-proxy.git
-      aliases: ["transcription-proxy", "remote transcription", "hosted transcription"]
-      description: Remote transcription deployment and service runtime.
+    - slug: CarettaAI/Project-N
+      local_path: /Users/omarelamin/Documents/Caretta/repos/caretta-app/Project-N
+      remote_url: https://github.com/CarettaAI/Project-N.git
+      base_branch: dev
+      aliases: ["Project-N", "desktop", "electron", "smart notch", "overlay", "local transcription", "project-n-lambdas"]
+      description: Desktop app and live in-call runtime; Electron shell, meeting detection, local capture, transcription hooks, CRM bridge, package work, and desktop packaging. Do not choose this for saved-call history pages, post-call detail tabs, or follow-up email drafts unless the issue explicitly says desktop overlay or live runtime.
+    - slug: CarettaAI/caretta-webapp
+      local_path: /Users/omarelamin/Documents/Caretta/repos/caretta-app/caretta-webapp
+      remote_url: https://github.com/CarettaAI/caretta-webapp.git
+      base_branch: dev
+      aliases: ["caretta-webapp", "webapp", "web app", "Next.js", "onboarding", "settings", "history", "history tab", "post-call", "saved call", "call details", "follow-up email", "email draft", "calendar", "CRM"]
+      description: Customer-facing web app, authenticated routes, product UI, onboarding, settings, saved-call history, post-call detail tabs, follow-up email drafts/templates, calendar, CRM, and browser API routes.
+    - slug: CarettaAI/caretta-app-shared
+      local_path: /Users/omarelamin/Documents/Caretta/repos/caretta-app/caretta-app-shared
+      base_branch: dev
+      aliases: ["caretta-app-shared", "shared contracts", "shared types", "schemas"]
+      description: Shared contracts, schemas, helpers, and app types used by desktop and web surfaces.
+    - slug: CarettaAI/caretta-slack
+      local_path: /Users/omarelamin/Documents/Caretta/repos/caretta-slack
+      remote_url: https://github.com/CarettaAI/caretta-slack.git
+      base_branch: dev
+      aliases: ["caretta-slack", "Slack", "Telegram", "messaging", "home tab", "bot", "OAuth"]
+      description: Slack, Telegram, messaging integration lambdas, install flows, bot behavior, and integration infrastructure.
+    - slug: CarettaAI/chat-engine
+      local_path: /Users/omarelamin/Documents/Caretta/repos/chat-engine
+      remote_url: https://github.com/CarettaAI/chat-engine.git
+      base_branch: dev
+      aliases: ["chat-engine", "chat runtime", "assistant", "automations", "async agent"]
+      description: Chat runtime, assistant behavior, async agents, automations, prompt composition, and assistant routes.
+    - slug: CarettaAI/kb-service
+      local_path: /Users/omarelamin/Documents/Caretta/repos/kb-service
+      remote_url: https://github.com/CarettaAI/kb-service.git
+      base_branch: dev
+      aliases: ["kb-service", "knowledge service", "knowledge ingestion", "vector sync", "RAG"]
+      description: Knowledge ingestion, retrieval, vector sync, transcript FAQ extraction, and organization knowledge upserts.
+    - slug: CarettaAI/doc-to-context
+      local_path: /Users/omarelamin/Documents/Caretta/repos/doc-to-context
+      remote_url: https://github.com/CarettaAI/doc-to-context.git
+      base_branch: dev
+      aliases: ["doc-to-context", "documents", "document packs", "splitting", "context"]
+      description: Document conversion, splitting, extraction, context packaging, and knowledge-base tooling.
+    - slug: CarettaAI/llm-gateway-tensorzero
+      local_path: /Users/omarelamin/Documents/Caretta/repos/llm-gateway-tensorzero
+      remote_url: https://github.com/CarettaAI/llm-gateway-tensorzero.git
+      base_branch: dev
+      aliases: ["llm-gateway-tensorzero", "llm-gateway", "LLM gateway", "TensorZero", "model gateway", "prompts", "schemas", "gateway"]
+      description: TensorZero-backed model gateway configuration, prompt schemas, provider routing, experiments, and infrastructure.
+    - slug: CarettaAI/asr-service
+      local_path: /Users/omarelamin/Documents/Caretta/repos/asr-service
+      remote_url: https://github.com/CarettaAI/asr-service.git
+      base_branch: dev
+      aliases: ["asr-service", "ASR", "speech recognition", "hosted recognition"]
+      description: Hosted speech recognition and ASR service behavior.
+    - slug: CarettaAI/caretta-dashboard
+      local_path: /Users/omarelamin/Documents/Caretta/repos/caretta-dashboard
+      remote_url: https://github.com/CarettaAI/caretta-dashboard.git
+      base_branch: dev
+      aliases: ["caretta-dashboard", "dashboard", "reporting", "admin"]
+      description: Internal dashboard, reporting, and operational product surfaces.
+    - slug: CarettaAI/caretta-metrics
+      local_path: /Users/omarelamin/Documents/Caretta/repos/caretta-metrics
+      remote_url: https://github.com/CarettaAI/caretta-metrics.git
+      base_branch: dev
+      aliases: ["caretta-metrics", "metrics", "QA sampling"]
+      description: Svelte metrics app for explicit metrics UI and QA sampling work.
+    - slug: CarettaAI/yc-launch-lp
+      local_path: /Users/omarelamin/Documents/Caretta/repos/yc-launch-lp
+      remote_url: https://github.com/CarettaAI/yc-launch-lp.git
+      base_branch: dev
+      aliases: ["yc-launch-lp", "YC launch", "landing page"]
+      description: YC launch and marketing landing page work.
+    - slug: RubyBit/aec3-rs
+      local_path: /Users/omarelamin/Documents/Caretta/repos/aec3-rs
+      remote_url: https://github.com/RubyBit/aec3-rs.git
+      aliases: ["aec3-rs", "AEC", "audio echo cancellation"]
+      description: Audio echo cancellation library work when explicitly named.
+    - slug: TheBoredTeam/boring.notch
+      local_path: /Users/omarelamin/Documents/Caretta/repos/boring.notch
+      remote_url: https://github.com/TheBoredTeam/boring.notch.git
+      base_branch: dev
+      aliases: ["boring.notch", "notch"]
+      description: Boring Notch app work when explicitly named.
+    - slug: openclaw/openclaw
+      local_path: /Users/omarelamin/Documents/Caretta/repos/openclaw
+      remote_url: https://github.com/openclaw/openclaw.git
+      aliases: ["openclaw"]
+      description: OpenClaw work when explicitly named.
+    - slug: tensorzero/tensorzero
+      local_path: /Users/omarelamin/Documents/Caretta/repos/tensorzero
+      remote_url: https://github.com/tensorzero/tensorzero.git
+      aliases: ["tensorzero"]
+      description: TensorZero upstream work when explicitly named.
 ---
 You are working on a Linear issue in an unattended Symphony run.
 
@@ -161,15 +184,13 @@ Issue: {{ issue.identifier }} - {{ issue.title }}
 URL: {{ issue.url }}
 Priority: {{ issue.priority }}
 State: {{ issue.state }}
-Labels: {% for label in issue.labels %}{{ label }}{% unless forloop.last %}, {% endunless %}{% endfor %}
+Attempt: {{ attempt }}
 
-{% if attempt %}
 Continuation context:
 
-- This is retry/continuation attempt #{{ attempt }} because the issue was still in an active state.
+- If `Attempt` is populated, this is a retry/continuation because the issue was still in an active state.
 - Resume from the current workspace and Linear workpad state. Do not restart from scratch.
 - Do not end the turn while the issue is still `Todo`, `In Progress`, `Rework`, or `Merging` unless a true external blocker remains.
-{% endif %}
 
 Description:
 {{ issue.description }}
