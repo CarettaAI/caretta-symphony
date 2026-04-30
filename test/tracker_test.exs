@@ -1,6 +1,7 @@
 defmodule Symphony.TrackerTest do
   use ExUnit.Case, async: true
 
+  alias Symphony.Error
   alias Symphony.Config.TrackerConfig
   alias Symphony.Tracker.{CodexMcpGateway, LinearClient, LinearMcpClient}
 
@@ -297,5 +298,68 @@ defmodule Symphony.TrackerTest do
              "id" => "ENG-1",
              "state" => "completed"
            }) == %{"ok" => true}
+  end
+
+  @tag :tmp_dir
+  test "Codex MCP gateway keeps app-server stderr logs out of the protocol stream", %{
+    tmp_dir: tmp_dir
+  } do
+    fake_server = Path.join(tmp_dir, "fake_app_server.py")
+
+    File.write!(fake_server, ~S"""
+    import json
+    import sys
+
+    call_request_id = None
+
+    print("\033[2m2026-04-30T10:47:06Z\033[0m \033[31mERROR\033[0m model refresh failed", file=sys.stderr, flush=True)
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        if method == "initialize":
+            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+        elif method == "initialized":
+            pass
+        elif method == "thread/start":
+            print(json.dumps({"id": msg["id"], "result": {"thread": {"id": "thr_1"}}}), flush=True)
+        elif method == "mcpServer/tool/call":
+            call_request_id = msg["id"]
+            print("non-protocol diagnostic on stderr", file=sys.stderr, flush=True)
+            print(json.dumps({"id": call_request_id, "result": {"content": [{"type": "text", "text": "{\"ok\": true}"}], "isError": False}}), flush=True)
+    """)
+
+    gateway = %CodexMcpGateway{command: "python3 #{fake_server}", cwd: tmp_dir}
+
+    assert CodexMcpGateway.call_tool(gateway, "linear mcp server_list_issues", %{}) == %{
+             "ok" => true
+           }
+  end
+
+  @tag :tmp_dir
+  test "Codex MCP gateway wraps app-server startup timeouts as tracker gateway errors", %{
+    tmp_dir: tmp_dir
+  } do
+    fake_server = Path.join(tmp_dir, "fake_hanging_app_server.py")
+
+    File.write!(fake_server, ~S"""
+    import time
+
+    while True:
+        time.sleep(1)
+    """)
+
+    gateway = %CodexMcpGateway{
+      command: "python3 #{fake_server}",
+      cwd: tmp_dir,
+      attempts: 1,
+      timeout_ms: 50
+    }
+
+    assert_raise Error,
+                 ~r/linear_mcp_app_server: app-server setup failed for Linear MCP gateway: response_timeout:/,
+                 fn ->
+                   CodexMcpGateway.call_tool(gateway, "linear mcp server_list_issues", %{})
+                 end
   end
 end

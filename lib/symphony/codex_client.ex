@@ -188,7 +188,6 @@ defmodule Symphony.CodexClient do
       :binary,
       :exit_status,
       :use_stdio,
-      :stderr_to_stdout,
       {:args, ["-lc", "exec " <> command]},
       {:cd, cwd}
     ])
@@ -354,7 +353,7 @@ defmodule Symphony.CodexClient do
       {:error, reason} ->
         raise Error,
           code: :response_error,
-          message: "malformed app-server JSON: #{inspect(reason)}"
+          message: "malformed app-server JSON: #{Exception.message(reason)}"
     end
   end
 

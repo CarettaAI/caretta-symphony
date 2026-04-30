@@ -66,6 +66,49 @@ defmodule Symphony.CodexClientTest do
   end
 
   @tag :tmp_dir
+  test "Codex JSONL client does not decode app-server stderr logs as protocol messages", %{
+    tmp_dir: tmp_dir
+  } do
+    fake_server = Path.join(tmp_dir, "fake_app_server.py")
+
+    File.write!(fake_server, ~S"""
+    import json
+    import sys
+
+    thread_id = "thr_stderr"
+    turn_id = "turn_stderr"
+
+    print("\033[31mERROR\033[0m background model refresh failed", file=sys.stderr, flush=True)
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        if method == "initialize":
+            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+        elif method == "initialized":
+            pass
+        elif method == "thread/start":
+            print(json.dumps({"id": msg["id"], "result": {"thread": {"id": thread_id}}}), flush=True)
+        elif method == "turn/start":
+            print("\033[2m2026-04-30T10:47:06Z\033[0m stderr log line", file=sys.stderr, flush=True)
+            print(json.dumps({"id": msg["id"], "result": {"turn": {"id": turn_id}}}), flush=True)
+            print(json.dumps({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed"}}}), flush=True)
+    """)
+
+    session =
+      CodexClient.start_session(%CodexConfig{command: "python3 #{fake_server}"}, tmp_dir,
+        tracker_config: nil,
+        on_event: fn _ -> :ok end
+      )
+
+    {result, session} = CodexClient.run_turn(session, "hello")
+    CodexClient.stop_session(session)
+
+    assert result.thread_id == "thr_stderr"
+    assert result.status == "completed"
+  end
+
+  @tag :tmp_dir
   test "Codex JSONL client auto answers freeform tool input", %{tmp_dir: tmp_dir} do
     fake_server = Path.join(tmp_dir, "fake_app_server.py")
 

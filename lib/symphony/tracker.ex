@@ -507,25 +507,31 @@ defmodule Symphony.Tracker do
 
   defmodule CodexMcpGateway do
     @gateway_attempts 3
+    @gateway_timeout_ms 30_000
 
     defstruct command: "codex app-server",
               server: "codex_apps",
               cwd: nil,
+              attempts: @gateway_attempts,
+              timeout_ms: @gateway_timeout_ms,
               next_id: 1,
               buffer: "",
               port: nil
 
     alias Symphony.CodexClient
+    alias Symphony.Config.CodexConfig
     alias Symphony.Error
     alias Symphony.Utils
 
     def call_tool(%__MODULE__{} = gateway, tool, arguments) do
-      Enum.reduce_while(1..@gateway_attempts, nil, fn attempt, _last_error ->
+      attempts = gateway_attempts(gateway)
+
+      Enum.reduce_while(1..attempts, nil, fn attempt, _last_error ->
         try do
           {:halt, call_tool_once(gateway, tool, arguments)}
         rescue
           error in Error ->
-            if retryable?(error) and attempt < @gateway_attempts do
+            if retryable?(error) and attempt < attempts do
               Process.sleep(min(2 * attempt, 5) * 1000)
               {:cont, error}
             else
@@ -539,9 +545,20 @@ defmodule Symphony.Tracker do
       cwd = Path.expand(gateway.cwd || File.cwd!())
 
       session =
-        CodexClient.start_session(%Symphony.Config.CodexConfig{command: gateway.command}, cwd,
-          on_event: fn _ -> :ok end
-        )
+        try do
+          CodexClient.start_session(
+            %CodexConfig{command: gateway.command, read_timeout_ms: gateway_timeout_ms(gateway)},
+            cwd,
+            on_event: fn _ -> :ok end
+          )
+        rescue
+          error ->
+            raise Error,
+              code: :linear_mcp_app_server,
+              message:
+                "app-server setup failed for Linear MCP gateway: #{Exception.message(error)}",
+              cause: error
+        end
 
       try do
         {response, _session} =
@@ -603,7 +620,7 @@ defmodule Symphony.Tracker do
     defp read_message(gateway) do
       case next_line(gateway.buffer) do
         {line, rest} ->
-          {Jason.decode!(line), %{gateway | buffer: rest}}
+          {decode_line(line), %{gateway | buffer: rest}}
 
         :none ->
           receive do
@@ -615,11 +632,28 @@ defmodule Symphony.Tracker do
                 code: :linear_mcp_app_server,
                 message: "app-server exited before MCP response: #{status}"
           after
-            30_000 ->
+            max(gateway_timeout_ms(gateway), 1) ->
               raise Error,
                 code: :linear_mcp_app_server,
                 message: "timed out waiting for app-server MCP response"
           end
+      end
+    end
+
+    defp decode_line(line) do
+      case Jason.decode(line) do
+        {:ok, %{} = msg} ->
+          msg
+
+        {:ok, _} ->
+          raise Error,
+            code: :linear_mcp_app_server,
+            message: "app-server MCP message is not an object"
+
+        {:error, reason} ->
+          raise Error,
+            code: :linear_mcp_app_server,
+            message: "malformed app-server MCP JSON: #{Exception.message(reason)}"
       end
     end
 
@@ -707,6 +741,18 @@ defmodule Symphony.Tracker do
         ])
 
     defp retryable?(_), do: false
+
+    defp gateway_attempts(%__MODULE__{attempts: attempts})
+         when is_integer(attempts) and attempts > 0,
+         do: attempts
+
+    defp gateway_attempts(_gateway), do: @gateway_attempts
+
+    defp gateway_timeout_ms(%__MODULE__{timeout_ms: timeout_ms})
+         when is_integer(timeout_ms) and timeout_ms > 0,
+         do: timeout_ms
+
+    defp gateway_timeout_ms(_gateway), do: @gateway_timeout_ms
   end
 
   def normalize_attachments(value) when is_list(value) do
