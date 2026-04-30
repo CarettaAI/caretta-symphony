@@ -42,6 +42,7 @@ defmodule Symphony.SelfHealTest do
     File.write!(workflow_path, "body")
     artifact_path = Path.join(tmp_dir, "symphony")
     File.write!(artifact_path, "#!/bin/sh\n")
+    File.chmod!(artifact_path, 0o755)
 
     config =
       service_config(tmp_dir,
@@ -71,6 +72,47 @@ defmodule Symphony.SelfHealTest do
     assert command =~ "symphony-test"
     assert command =~ artifact_path
     assert command =~ workflow_path
+  end
+
+  @tag :tmp_dir
+  test "restart_managed refuses to stop a running service before artifact preflight passes", %{
+    tmp_dir: tmp_dir
+  } do
+    workflow_path = Path.join(tmp_dir, "WORKFLOW.md")
+    File.write!(workflow_path, "body")
+
+    config =
+      service_config(tmp_dir,
+        self_healing: %SelfHealingConfig{
+          enabled: true,
+          workspace_root: Path.join(tmp_dir, "heal"),
+          tmux_session: "symphony-test",
+          restart_port: 9999,
+          restart_workflow_path: workflow_path
+        }
+      )
+
+    test_pid = self()
+
+    runner = fn command, cwd, _env ->
+      send(test_pid, {:unexpected_command, command, cwd})
+      %CommandResult{command: command, cwd: cwd, status: 0, output: ""}
+    end
+
+    missing_artifact_path = Path.join(tmp_dir, "missing-symphony")
+
+    assert {:error, [%CommandResult{} = result]} =
+             SelfHeal.restart_managed(config,
+               artifact_path: missing_artifact_path,
+               runner: runner
+             )
+
+    assert result.command == "preflight managed Symphony artifact"
+    assert result.cwd == tmp_dir
+    assert result.status == 1
+    assert result.output =~ "managed restart requires an executable Symphony artifact"
+    assert result.output =~ missing_artifact_path
+    refute_received {:unexpected_command, _command, _cwd}
   end
 
   @tag :tmp_dir
