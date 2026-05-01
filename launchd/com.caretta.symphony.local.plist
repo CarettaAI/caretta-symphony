@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.caretta.symphony.local</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/omarelamin/Documents/Codex/2026-04-28/implement-symphony-according-to-the-following</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd /Users/omarelamin/Documents/Codex/2026-04-28/implement-symphony-according-to-the-following &amp;&amp; exec ./scripts/symphony-managed.sh run</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/var/tmp/caretta-symphony.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/var/tmp/caretta-symphony.err.log</string>
+</dict>
+</plist>
