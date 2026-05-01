@@ -66,6 +66,43 @@ defmodule Symphony.CodexClientTest do
   end
 
   @tag :tmp_dir
+  test "Codex JSONL client keeps stderr diagnostics out of protocol stream", %{tmp_dir: tmp_dir} do
+    fake_server = Path.join(tmp_dir, "fake_app_server.py")
+
+    File.write!(fake_server, ~S"""
+    import json
+    import sys
+
+    print("\033[31mERROR\033[0m model refresh failed", file=sys.stderr, flush=True)
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        if method == "initialize":
+            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+        elif method == "initialized":
+            pass
+        elif method == "thread/start":
+            print(json.dumps({"id": msg["id"], "result": {"thread": {"id": "thr_stderr"}}}), flush=True)
+        elif method == "turn/start":
+            print(json.dumps({"id": msg["id"], "result": {"turn": {"id": "turn_stderr"}}}), flush=True)
+            print(json.dumps({"method": "turn/completed", "params": {"threadId": "thr_stderr", "turn": {"id": "turn_stderr", "status": "completed"}}}), flush=True)
+    """)
+
+    session =
+      CodexClient.start_session(%CodexConfig{command: "python3 #{fake_server}"}, tmp_dir,
+        tracker_config: nil,
+        on_event: fn _ -> :ok end
+      )
+
+    {result, session} = CodexClient.run_turn(session, "hello")
+    CodexClient.stop_session(session)
+
+    assert result.thread_id == "thr_stderr"
+    assert result.status == "completed"
+  end
+
+  @tag :tmp_dir
   test "Codex JSONL client auto answers freeform tool input", %{tmp_dir: tmp_dir} do
     fake_server = Path.join(tmp_dir, "fake_app_server.py")
 

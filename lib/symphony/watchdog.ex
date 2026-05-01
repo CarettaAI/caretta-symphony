@@ -145,33 +145,37 @@ defmodule Symphony.Watchdog do
   end
 
   defp stale_poll?(service, stale_poll_ms, now) do
-    last_completed = Utils.parse_datetime(service["last_poll_completed_at"])
-    last_started = Utils.parse_datetime(service["last_poll_started_at"])
-    startup_completed = Utils.parse_datetime(service["startup_completed_at"])
-
-    cond do
-      last_completed ->
-        age_ms(last_completed, now) > stale_poll_ms
-
-      last_started ->
-        age_ms(last_started, now) > stale_poll_ms
-
-      startup_completed ->
-        age_ms(startup_completed, now) > stale_poll_ms
-
-      true ->
-        false
+    case latest_service_timestamp(service) do
+      {_raw, timestamp} -> age_ms(timestamp, now) > stale_poll_ms
+      nil -> false
     end
   end
 
   defp stale_reason(service, stale_poll_ms) do
     observed_at =
-      service["last_poll_completed_at"] ||
-        service["last_poll_started_at"] ||
-        service["startup_completed_at"] ||
-        "unknown"
+      case latest_service_timestamp(service) do
+        {raw, _timestamp} -> raw
+        nil -> "unknown"
+      end
 
     "Symphony poll state is stale for more than #{stale_poll_ms} ms; last observed poll timestamp=#{observed_at}"
+  end
+
+  defp latest_service_timestamp(service) do
+    [
+      service["last_poll_completed_at"],
+      service["last_poll_started_at"],
+      service["startup_completed_at"]
+    ]
+    |> Enum.flat_map(fn raw ->
+      case Utils.parse_datetime(raw) do
+        %DateTime{} = timestamp -> [{raw, timestamp}]
+        nil -> []
+      end
+    end)
+    |> Enum.max_by(fn {_raw, timestamp} -> DateTime.to_unix(timestamp, :millisecond) end, fn ->
+      nil
+    end)
   end
 
   defp age_ms(%DateTime{} = timestamp, %DateTime{} = now),

@@ -502,7 +502,9 @@ defmodule Symphony.Orchestrator do
               last_poll_error: nil
           }
       }
-      |> reconcile_running_issues(tracker, config)
+      |> publish_snapshot_cache()
+
+    orchestrator = reconcile_running_issues(orchestrator, tracker, config)
 
     try do
       ConfigManager.validate_for_dispatch!(manager)

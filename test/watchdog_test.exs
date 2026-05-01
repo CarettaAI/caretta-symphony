@@ -64,6 +64,23 @@ defmodule Symphony.WatchdogTest do
              )
   end
 
+  test "fresh in-flight poll start prevents stale completion trigger" do
+    config = config(stale_poll_ms: 120_000)
+
+    assert :healthy =
+             Watchdog.classify_state(
+               %{
+                 "service" => %{
+                   "status" => "polling",
+                   "last_poll_completed_at" => "2026-04-30T11:55:00Z",
+                   "last_poll_started_at" => "2026-04-30T11:59:30Z"
+                 }
+               },
+               config,
+               now()
+             )
+  end
+
   test "run_once dispatches self-heal with trigger reason" do
     config = config(stale_poll_ms: 120_000)
     test_pid = self()

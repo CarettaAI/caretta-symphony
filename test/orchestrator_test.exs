@@ -1339,7 +1339,13 @@ defmodule Symphony.OrchestratorTest do
       fetch_issue_states_by_ids: fn _ids -> [] end,
       fetch_candidate_issues: fn ->
         send(parent, :slow_candidate_fetch_started)
-        Process.sleep(750)
+
+        receive do
+          :release_candidate_fetch -> :ok
+        after
+          2_000 -> :ok
+        end
+
         []
       end
     }
@@ -1364,7 +1370,9 @@ defmodule Symphony.OrchestratorTest do
 
       state = Jason.decode!(body)
       assert get_in(state, ["service", "snapshot_source"]) == "live_cache"
-      refute get_in(state, ["service", "status"]) == "busy"
+      assert get_in(state, ["service", "status"]) == "polling"
+      assert get_in(state, ["service", "last_poll_started_at"])
+      send(pid, :release_candidate_fetch)
     after
       HTTPServer.stop(server)
       Orchestrator.stop(pid)
