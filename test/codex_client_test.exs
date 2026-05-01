@@ -152,6 +152,36 @@ defmodule Symphony.CodexClientTest do
   end
 
   @tag :tmp_dir
+  test "Codex JSONL client ignores app-server stderr logs", %{tmp_dir: tmp_dir} do
+    fake_server = Path.join(tmp_dir, "fake_noisy_app_server.py")
+
+    File.write!(fake_server, ~S"""
+    import json
+    import sys
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        if method == "initialize":
+            print("\x1b[31mERROR\x1b[0m non-json diagnostic", file=sys.stderr, flush=True)
+            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+        elif method == "initialized":
+            pass
+        elif method == "thread/start":
+            print(json.dumps({"id": msg["id"], "result": {"thread": {"id": "thr_stderr"}}}), flush=True)
+    """)
+
+    session =
+      CodexClient.start_session(%CodexConfig{command: "python3 #{fake_server}"}, tmp_dir,
+        tracker_config: nil,
+        on_event: fn _ -> :ok end
+      )
+
+    assert session.thread_id == "thr_stderr"
+    CodexClient.stop_session(session)
+  end
+
+  @tag :tmp_dir
   test "Codex JSONL client cleans up when start times out", %{tmp_dir: tmp_dir} do
     marker = Path.join(tmp_dir, "pid.txt")
     fake_server = Path.join(tmp_dir, "fake_hanging_app_server.py")

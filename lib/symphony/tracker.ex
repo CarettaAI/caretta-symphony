@@ -260,13 +260,50 @@ defmodule Symphony.Tracker do
 
   defmodule LinearMcpClient do
     @linear_page_size 50
-    @linear_mcp_tool_list_issues "linear mcp server_list_issues"
-    @linear_mcp_tool_get_issue "linear mcp server_get_issue"
-    @linear_mcp_tool_list_comments "linear mcp server_list_comments"
-    @linear_mcp_tool_save_comment "linear mcp server_save_comment"
-    @linear_mcp_tool_save_issue "linear mcp server_save_issue"
+    @linear_mcp_tool_aliases %{
+      "list_issues" => [
+        "_list_issues",
+        "linear._list_issues",
+        "list_issues",
+        "linear.list_issues",
+        "linear_list_issues",
+        "linear mcp server_list_issues"
+      ],
+      "get_issue" => [
+        "_get_issue",
+        "linear._get_issue",
+        "get_issue",
+        "linear.get_issue",
+        "linear_get_issue",
+        "linear mcp server_get_issue"
+      ],
+      "list_comments" => [
+        "_list_comments",
+        "linear._list_comments",
+        "list_comments",
+        "linear.list_comments",
+        "linear_list_comments",
+        "linear mcp server_list_comments"
+      ],
+      "save_comment" => [
+        "_save_comment",
+        "linear._save_comment",
+        "save_comment",
+        "linear.save_comment",
+        "linear_save_comment",
+        "linear mcp server_save_comment"
+      ],
+      "save_issue" => [
+        "_save_issue",
+        "linear._save_issue",
+        "save_issue",
+        "linear.save_issue",
+        "linear_save_issue",
+        "linear mcp server_save_issue"
+      ]
+    }
 
-    defstruct config: nil, gateway: nil
+    defstruct config: nil, gateway: nil, tool_cache_dir: nil
 
     alias Symphony.Error
     alias Symphony.Models.{BlockerRef, Issue}
@@ -289,14 +326,14 @@ defmodule Symphony.Tracker do
     def fetch_issue_states_by_ids(%__MODULE__{} = client, ids) do
       Enum.map(ids, fn id ->
         client
-        |> call_gateway(@linear_mcp_tool_get_issue, %{"id" => id, "includeRelations" => true})
+        |> call_linear_tool("get_issue", %{"id" => id, "includeRelations" => true})
         |> normalize_issue()
       end)
     end
 
     def list_issue_comments(%__MODULE__{} = client, issue_id) do
       body =
-        call_gateway(client, @linear_mcp_tool_list_comments, %{
+        call_linear_tool(client, "list_comments", %{
           "issueId" => issue_id,
           "limit" => 250,
           "orderBy" => "createdAt"
@@ -327,7 +364,7 @@ defmodule Symphony.Tracker do
           %{"body" => body, "issueId" => issue_id}
         end
 
-      response = call_gateway(client, @linear_mcp_tool_save_comment, args)
+      response = call_linear_tool(client, "save_comment", args)
 
       unless is_map(response),
         do:
@@ -341,7 +378,7 @@ defmodule Symphony.Tracker do
 
     def save_issue_state(%__MODULE__{} = client, issue_id, state) do
       response =
-        call_gateway(client, @linear_mcp_tool_save_issue, %{"id" => issue_id, "state" => state})
+        call_linear_tool(client, "save_issue", %{"id" => issue_id, "state" => state})
 
       unless is_map(response),
         do:
@@ -363,7 +400,7 @@ defmodule Symphony.Tracker do
         |> put_if("label", List.first(client.config.required_labels))
         |> put_if("cursor", cursor)
 
-      body = call_gateway(client, @linear_mcp_tool_list_issues, args)
+      body = call_linear_tool(client, "list_issues", args)
       nodes = body["issues"]
 
       unless is_list(nodes) do
@@ -393,7 +430,7 @@ defmodule Symphony.Tracker do
       Enum.map(issues, fn issue ->
         if String.downcase(issue.state) == "todo" do
           client
-          |> call_gateway(@linear_mcp_tool_get_issue, %{
+          |> call_linear_tool("get_issue", %{
             "id" => issue.identifier,
             "includeRelations" => true
           })
@@ -473,6 +510,153 @@ defmodule Symphony.Tracker do
           code: :linear_unknown_payload,
           message: "Linear MCP issue payload is not an object"
         )
+
+    defp call_linear_tool(%__MODULE__{} = client, operation, args) do
+      candidates = linear_mcp_tool_candidates(client, operation)
+      call_linear_tool_candidate(client, operation, candidates, args, nil, candidates)
+    end
+
+    defp call_linear_tool_candidate(_client, operation, [], _args, last_error, tried_candidates) do
+      last =
+        if last_error do
+          Exception.message(last_error)
+        else
+          "none"
+        end
+
+      tried = Enum.join(tried_candidates, ", ")
+
+      raise Error,
+        code: :linear_mcp_tool_unavailable,
+        message:
+          "Linear MCP tool unavailable for #{operation}; tried #{tried}; last error: #{last}"
+    end
+
+    defp call_linear_tool_candidate(client, operation, [tool | rest], args, _last_error, tried) do
+      call_gateway(client, tool, args)
+    rescue
+      error in Error ->
+        if unknown_mcp_tool_error?(error) do
+          call_linear_tool_candidate(client, operation, rest, args, error, tried)
+        else
+          reraise error, __STACKTRACE__
+        end
+    end
+
+    defp linear_mcp_tool_candidates(%__MODULE__{} = client, operation) do
+      cached_linear_mcp_tool_candidates(client, operation)
+      |> Kernel.++(Map.fetch!(@linear_mcp_tool_aliases, operation))
+      |> Enum.map(&(to_string(&1) |> String.trim()))
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+    end
+
+    defp cached_linear_mcp_tool_candidates(%__MODULE__{} = client, operation) do
+      cache_dir = client.tool_cache_dir || codex_apps_tool_cache_dir()
+      server = client.config && client.config.mcp_server
+
+      with true <- is_binary(cache_dir),
+           {:ok, filenames} <- File.ls(cache_dir) do
+        filenames
+        |> Enum.filter(&String.ends_with?(&1, ".json"))
+        |> Enum.flat_map(fn filename ->
+          cache_dir
+          |> Path.join(filename)
+          |> cached_linear_mcp_tool_candidates_from_file(server, operation)
+        end)
+      else
+        _ -> []
+      end
+    end
+
+    defp cached_linear_mcp_tool_candidates_from_file(path, server, operation) do
+      with {:ok, raw} <- File.read(path),
+           {:ok, entries} when is_list(entries) <- Jason.decode(raw) do
+        entries
+        |> Enum.filter(&linear_mcp_tool_cache_entry?(&1, server, operation))
+        |> Enum.flat_map(&tool_names_from_cache_entry/1)
+      else
+        _ -> []
+      end
+    end
+
+    defp linear_mcp_tool_cache_entry?(entry, server, operation) when is_map(entry) do
+      server_matches? =
+        is_nil(server) or to_string(entry["server_name"] || "") == to_string(server)
+
+      server_matches? and linear_tool_cache_entry?(entry) and
+        operation_matches_cache_entry?(entry, operation)
+    end
+
+    defp linear_mcp_tool_cache_entry?(_entry, _server, _operation), do: false
+
+    defp linear_tool_cache_entry?(entry) do
+      connector = entry["connector_name"] |> to_string() |> String.downcase()
+      namespace = entry["tool_namespace"] |> to_string() |> String.downcase()
+      tool_name = get_in(entry, ["tool", "name"]) |> to_string() |> String.downcase()
+
+      connector == "linear" or String.ends_with?(namespace, "__linear") or
+        String.starts_with?(tool_name, "linear_")
+    end
+
+    defp operation_matches_cache_entry?(entry, operation) do
+      expected_tool_name = "_#{operation}"
+      expected_namespaced_name = "linear_#{operation}"
+
+      entry["tool_name"] == expected_tool_name or
+        get_in(entry, ["tool", "title"]) == operation or
+        get_in(entry, ["tool", "name"]) == expected_namespaced_name
+    end
+
+    defp tool_names_from_cache_entry(entry) do
+      namespace = entry["tool_namespace"]
+      tool_name = entry["tool_name"]
+
+      [
+        tool_name,
+        get_in(entry, ["tool", "name"]),
+        get_in(entry, ["tool", "title"]),
+        namespaced_cache_tool_name(namespace, tool_name),
+        namespaced_cache_tool_name(namespace, trim_leading_tool_underscore(tool_name))
+      ]
+    end
+
+    defp namespaced_cache_tool_name(namespace, tool_name)
+         when is_binary(namespace) and is_binary(tool_name) do
+      "#{namespace}__#{tool_name}"
+    end
+
+    defp namespaced_cache_tool_name(_namespace, _tool_name), do: nil
+
+    defp trim_leading_tool_underscore(tool_name) when is_binary(tool_name),
+      do: String.trim_leading(tool_name, "_")
+
+    defp trim_leading_tool_underscore(_tool_name), do: nil
+
+    defp codex_apps_tool_cache_dir do
+      codex_home =
+        System.get_env("CODEX_HOME") ||
+          Path.join(System.user_home!(), ".codex")
+
+      Path.join([codex_home, "cache", "codex_apps_tools"])
+    end
+
+    defp unknown_mcp_tool_error?(%Error{code: code, message: message})
+         when code in [:linear_mcp_tool_error, :linear_mcp_app_server] do
+      normalized = String.downcase(to_string(message))
+
+      Enum.any?(
+        [
+          "unknown tool",
+          "tool not found",
+          "no such tool",
+          "unsupported tool"
+        ],
+        &String.contains?(normalized, &1)
+      )
+    end
+
+    defp unknown_mcp_tool_error?(_), do: false
 
     defp call_gateway(%__MODULE__{gateway: gateway}, tool, args) when is_function(gateway, 2),
       do: gateway.(tool, args)

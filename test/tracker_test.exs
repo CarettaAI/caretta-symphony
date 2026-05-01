@@ -219,8 +219,104 @@ defmodule Symphony.TrackerTest do
 
     assert hd(issue.blocked_by).identifier == "ENG-0"
 
-    assert_received {:gateway, "linear mcp server_list_issues",
+    assert_received {:gateway, "_list_issues",
                      %{"project" => "Pilot", "team" => "Platform Automation", "label" => "codex"}}
+  end
+
+  test "Linear MCP client falls back across app-server tool naming schemes" do
+    parent = self()
+
+    gateway = fn tool, arguments ->
+      send(parent, {:gateway, tool, arguments})
+
+      if tool == "linear mcp server_list_issues" do
+        %{
+          "issues" => [
+            %{"id" => "ENG-2", "title" => "Legacy gateway", "status" => "In Progress"}
+          ],
+          "hasNextPage" => false
+        }
+      else
+        raise Symphony.Error,
+          code: :linear_mcp_tool_error,
+          message:
+            Jason.encode!(%{
+              "isError" => true,
+              "content" => [%{"type" => "text", "text" => "Unknown tool: #{tool}"}]
+            })
+      end
+    end
+
+    client = %LinearMcpClient{
+      config: %TrackerConfig{
+        kind: "linear_mcp",
+        project_slug: "Pilot",
+        active_states: ["In Progress"]
+      },
+      gateway: gateway
+    }
+
+    assert [%{id: "ENG-2"}] = LinearMcpClient.fetch_candidate_issues(client)
+    assert_received {:gateway, "_list_issues", _}
+    assert_received {:gateway, "linear mcp server_list_issues", _}
+  end
+
+  @tag :tmp_dir
+  test "Linear MCP client discovers connected Linear tool names from Codex cache", %{
+    tmp_dir: tmp_dir
+  } do
+    cache_dir = Path.join(tmp_dir, "codex_apps_tools")
+    File.mkdir_p!(cache_dir)
+
+    File.write!(
+      Path.join(cache_dir, "tools.json"),
+      Jason.encode!([
+        %{
+          "server_name" => "codex_apps",
+          "tool_name" => "connected_linear_list_issues",
+          "tool_namespace" => "mcp__codex_apps__linear",
+          "connector_name" => "Linear",
+          "tool" => %{"name" => "linear_list_issues", "title" => "list_issues"}
+        }
+      ])
+    )
+
+    parent = self()
+
+    gateway = fn tool, _arguments ->
+      send(parent, {:gateway, tool})
+
+      if tool == "connected_linear_list_issues" do
+        %{
+          "issues" => [
+            %{"id" => "ENG-3", "title" => "Discovered gateway", "status" => "In Progress"}
+          ],
+          "hasNextPage" => false
+        }
+      else
+        raise Symphony.Error,
+          code: :linear_mcp_tool_error,
+          message:
+            Jason.encode!(%{
+              "isError" => true,
+              "content" => [%{"type" => "text", "text" => "Unknown tool: #{tool}"}]
+            })
+      end
+    end
+
+    client = %LinearMcpClient{
+      config: %TrackerConfig{
+        kind: "linear_mcp",
+        mcp_server: "codex_apps",
+        project_slug: "Pilot",
+        active_states: ["In Progress"]
+      },
+      gateway: gateway,
+      tool_cache_dir: cache_dir
+    }
+
+    assert [%{id: "ENG-3"}] = LinearMcpClient.fetch_candidate_issues(client)
+    assert_received {:gateway, "connected_linear_list_issues"}
   end
 
   test "Linear MCP client writes comments and state" do
@@ -254,14 +350,13 @@ defmodule Symphony.TrackerTest do
 
     LinearMcpClient.save_issue_state(client, "ENG-1", "completed")
 
-    assert_received {:gateway, "linear mcp server_list_comments",
+    assert_received {:gateway, "_list_comments",
                      %{"issueId" => "ENG-1", "limit" => 250, "orderBy" => "createdAt"}}
 
-    assert_received {:gateway, "linear mcp server_save_comment",
+    assert_received {:gateway, "_save_comment",
                      %{"body" => "## Codex Workpad\nnew", "id" => "comment-1"}}
 
-    assert_received {:gateway, "linear mcp server_save_issue",
-                     %{"id" => "ENG-1", "state" => "completed"}}
+    assert_received {:gateway, "_save_issue", %{"id" => "ENG-1", "state" => "completed"}}
   end
 
   @tag :tmp_dir
