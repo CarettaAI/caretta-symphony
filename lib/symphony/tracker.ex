@@ -260,11 +260,38 @@ defmodule Symphony.Tracker do
 
   defmodule LinearMcpClient do
     @linear_page_size 50
-    @linear_mcp_tool_list_issues "linear mcp server_list_issues"
-    @linear_mcp_tool_get_issue "linear mcp server_get_issue"
-    @linear_mcp_tool_list_comments "linear mcp server_list_comments"
-    @linear_mcp_tool_save_comment "linear mcp server_save_comment"
-    @linear_mcp_tool_save_issue "linear mcp server_save_issue"
+    @linear_mcp_tool_list_issues [
+      "linear._list_issues",
+      "_list_issues",
+      "linear mcp server_list_issues"
+    ]
+    @linear_mcp_tool_get_issue [
+      "linear._get_issue",
+      "_get_issue",
+      "linear mcp server_get_issue"
+    ]
+    @linear_mcp_tool_list_comments [
+      "linear._list_comments",
+      "_list_comments",
+      "linear mcp server_list_comments"
+    ]
+    @linear_mcp_tool_save_comment [
+      "linear._save_comment",
+      "_save_comment",
+      "linear mcp server_save_comment"
+    ]
+    @linear_mcp_tool_save_issue [
+      "linear._save_issue",
+      "_save_issue",
+      "linear mcp server_save_issue"
+    ]
+    @unknown_tool_message_fragments [
+      "unknown tool",
+      "unknown_tool",
+      "tool not found",
+      "no such tool",
+      "not a valid tool"
+    ]
 
     defstruct config: nil, gateway: nil
 
@@ -474,14 +501,42 @@ defmodule Symphony.Tracker do
           message: "Linear MCP issue payload is not an object"
         )
 
-    defp call_gateway(%__MODULE__{gateway: gateway}, tool, args) when is_function(gateway, 2),
-      do: gateway.(tool, args)
+    defp call_gateway(%__MODULE__{} = client, tools, args) when is_list(tools),
+      do: call_gateway_aliases(client, tools, args, [], nil)
 
-    defp call_gateway(%__MODULE__{gateway: gateway}, tool, args) when not is_nil(gateway) do
+    defp call_gateway(%__MODULE__{} = client, tool, args),
+      do: call_gateway(client, [tool], args)
+
+    defp call_gateway_aliases(_client, [], _args, tried_tools, last_error) do
+      raise_tool_unavailable(tried_tools, last_error)
+    end
+
+    defp call_gateway_aliases(client, [tool | rest], args, tried_tools, _last_error) do
+      call_gateway_once(client, tool, args)
+    rescue
+      error in Error ->
+        if unknown_tool_error?(error) do
+          tried_tools = tried_tools ++ [tool]
+
+          if rest == [] do
+            raise_tool_unavailable(tried_tools, error)
+          else
+            call_gateway_aliases(client, rest, args, tried_tools, error)
+          end
+        else
+          reraise error, __STACKTRACE__
+        end
+    end
+
+    defp call_gateway_once(%__MODULE__{gateway: gateway}, tool, args)
+         when is_function(gateway, 2),
+         do: gateway.(tool, args)
+
+    defp call_gateway_once(%__MODULE__{gateway: gateway}, tool, args) when not is_nil(gateway) do
       Symphony.Tracker.CodexMcpGateway.call_tool(gateway, tool, args)
     end
 
-    defp call_gateway(%__MODULE__{} = client, tool, args) do
+    defp call_gateway_once(%__MODULE__{} = client, tool, args) do
       gateway =
         struct(Symphony.Tracker.CodexMcpGateway,
           command: client.config.mcp_command,
@@ -489,6 +544,22 @@ defmodule Symphony.Tracker do
         )
 
       Symphony.Tracker.CodexMcpGateway.call_tool(gateway, tool, args)
+    end
+
+    defp unknown_tool_error?(%Error{code: code, message: message})
+         when code in [:linear_mcp_tool_error, :linear_mcp_app_server] and is_binary(message) do
+      normalized = String.downcase(message)
+      Enum.any?(@unknown_tool_message_fragments, &String.contains?(normalized, &1))
+    end
+
+    defp unknown_tool_error?(_), do: false
+
+    defp raise_tool_unavailable(tried_tools, last_error) do
+      message =
+        "Linear MCP tool unavailable; tried #{Enum.join(tried_tools, ", ")}" <>
+          if last_error, do: "; last error: #{Exception.message(last_error)}", else: ""
+
+      raise Error, code: :linear_mcp_tool_error, message: message
     end
 
     defp dedupe_issues(issues) do
