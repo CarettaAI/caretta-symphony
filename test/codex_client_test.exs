@@ -152,6 +152,50 @@ defmodule Symphony.CodexClientTest do
   end
 
   @tag :tmp_dir
+  test "Codex JSONL client keeps stderr logs out of the protocol stream", %{tmp_dir: tmp_dir} do
+    fake_server = Path.join(tmp_dir, "fake_app_server.py")
+
+    File.write!(fake_server, ~S"""
+    import json
+    import sys
+
+    thread_id = "thr_stderr"
+    turn_id = "turn_stderr"
+
+    sys.stderr.write("\x1b[31mERROR\x1b[0m noisy startup log before JSON\n")
+    sys.stderr.flush()
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        if method == "initialize":
+            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+        elif method == "initialized":
+            pass
+        elif method == "thread/start":
+            print(json.dumps({"id": msg["id"], "result": {"thread": {"id": thread_id}}}), flush=True)
+        elif method == "turn/start":
+            sys.stderr.write("\x1b[2mINFO\x1b[0m background diagnostic during turn\n")
+            sys.stderr.flush()
+            print(json.dumps({"id": msg["id"], "result": {"turn": {"id": turn_id}}}), flush=True)
+            print(json.dumps({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed"}}}), flush=True)
+    """)
+
+    session =
+      CodexClient.start_session(
+        %CodexConfig{command: "python3 #{fake_server}", read_timeout_ms: 1000},
+        tmp_dir,
+        tracker_config: nil,
+        on_event: fn _ -> :ok end
+      )
+
+    {result, session} = CodexClient.run_turn(session, "stderr")
+    CodexClient.stop_session(session)
+
+    assert result.status == "completed"
+  end
+
+  @tag :tmp_dir
   test "Codex JSONL client cleans up when start times out", %{tmp_dir: tmp_dir} do
     marker = Path.join(tmp_dir, "pid.txt")
     fake_server = Path.join(tmp_dir, "fake_hanging_app_server.py")

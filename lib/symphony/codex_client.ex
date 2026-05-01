@@ -188,7 +188,6 @@ defmodule Symphony.CodexClient do
       :binary,
       :exit_status,
       :use_stdio,
-      :stderr_to_stdout,
       {:args, ["-lc", "exec " <> command]},
       {:cd, cwd}
     ])

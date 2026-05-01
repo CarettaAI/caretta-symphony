@@ -507,10 +507,12 @@ defmodule Symphony.Tracker do
 
   defmodule CodexMcpGateway do
     @gateway_attempts 3
+    @gateway_read_timeout_ms 30_000
 
     defstruct command: "codex app-server",
               server: "codex_apps",
               cwd: nil,
+              read_timeout_ms: @gateway_read_timeout_ms,
               next_id: 1,
               buffer: "",
               port: nil
@@ -539,7 +541,12 @@ defmodule Symphony.Tracker do
       cwd = Path.expand(gateway.cwd || File.cwd!())
 
       session =
-        CodexClient.start_session(%Symphony.Config.CodexConfig{command: gateway.command}, cwd,
+        CodexClient.start_session(
+          %Symphony.Config.CodexConfig{
+            command: gateway.command,
+            read_timeout_ms: gateway.read_timeout_ms
+          },
+          cwd,
           on_event: fn _ -> :ok end
         )
 
