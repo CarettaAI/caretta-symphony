@@ -13,6 +13,8 @@ defmodule Symphony.CodexClientTest do
     import json
     import sys
 
+    print("diagnostic log line before JSON-RPC", file=sys.stderr, flush=True)
+
     thread_id = "thr_1"
     turn_id = "turn_1"
 

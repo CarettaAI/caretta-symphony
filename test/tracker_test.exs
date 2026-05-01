@@ -219,7 +219,7 @@ defmodule Symphony.TrackerTest do
 
     assert hd(issue.blocked_by).identifier == "ENG-0"
 
-    assert_received {:gateway, "linear mcp server_list_issues",
+    assert_received {:gateway, "linear_list_issues",
                      %{"project" => "Pilot", "team" => "Platform Automation", "label" => "codex"}}
   end
 
@@ -254,14 +254,48 @@ defmodule Symphony.TrackerTest do
 
     LinearMcpClient.save_issue_state(client, "ENG-1", "completed")
 
-    assert_received {:gateway, "linear mcp server_list_comments",
+    assert_received {:gateway, "linear_list_comments",
                      %{"issueId" => "ENG-1", "limit" => 250, "orderBy" => "createdAt"}}
 
-    assert_received {:gateway, "linear mcp server_save_comment",
+    assert_received {:gateway, "linear_save_comment",
                      %{"body" => "## Codex Workpad\nnew", "id" => "comment-1"}}
 
-    assert_received {:gateway, "linear mcp server_save_issue",
-                     %{"id" => "ENG-1", "state" => "completed"}}
+    assert_received {:gateway, "linear_save_issue", %{"id" => "ENG-1", "state" => "completed"}}
+  end
+
+  @tag :tmp_dir
+  test "Codex MCP gateway resolves advertised tool aliases", %{tmp_dir: tmp_dir} do
+    fake_server = Path.join(tmp_dir, "fake_app_server.py")
+
+    File.write!(fake_server, ~S"""
+    import json
+    import sys
+
+    thread_id = "thr_alias"
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method = msg.get("method")
+        if method == "initialize":
+            print(json.dumps({"id": msg["id"], "result": {}}), flush=True)
+        elif method == "initialized":
+            pass
+        elif method == "thread/start":
+            print(json.dumps({"id": msg["id"], "result": {"thread": {"id": thread_id}}}), flush=True)
+        elif method == "mcpServerStatus/list":
+            print(json.dumps({"id": msg["id"], "result": {"data": [{"name": "codex_apps", "authStatus": "bearerToken", "resources": [], "resourceTemplates": [], "tools": {"linear_list_issues": {"name": "linear_list_issues", "inputSchema": {}}}}]}}), flush=True)
+        elif method == "mcpServer/tool/call":
+            assert msg["params"]["tool"] == "linear_list_issues"
+            print(json.dumps({"id": msg["id"], "result": {"content": [{"type": "text", "text": "{\"issues\": [], \"hasNextPage\": false}"}], "isError": False}}), flush=True)
+    """)
+
+    gateway = %CodexMcpGateway{command: "python3 #{fake_server}", cwd: tmp_dir}
+
+    assert CodexMcpGateway.call_tool(
+             gateway,
+             ["linear mcp server_list_issues", "linear_list_issues"],
+             %{"state" => "Todo"}
+           ) == %{"issues" => [], "hasNextPage" => false}
   end
 
   @tag :tmp_dir
