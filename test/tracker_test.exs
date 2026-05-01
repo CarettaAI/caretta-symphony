@@ -219,8 +219,78 @@ defmodule Symphony.TrackerTest do
 
     assert hd(issue.blocked_by).identifier == "ENG-0"
 
-    assert_received {:gateway, "linear mcp server_list_issues",
+    assert_received {:gateway, "_list_issues",
                      %{"project" => "Pilot", "team" => "Platform Automation", "label" => "codex"}}
+  end
+
+  test "Linear MCP client falls back across unavailable tool aliases" do
+    parent = self()
+
+    gateway = fn tool, arguments ->
+      send(parent, {:gateway, tool, arguments})
+
+      case tool do
+        "old_list_issues" ->
+          raise Symphony.Error,
+            code: :linear_mcp_tool_error,
+            message:
+              Jason.encode!(%{
+                "content" => [%{"type" => "text", "text" => "Unknown tool: old_list_issues"}],
+                "isError" => true
+              })
+
+        "current_list_issues" ->
+          assert arguments["state"] == "Todo"
+          %{"issues" => [], "hasNextPage" => false}
+      end
+    end
+
+    client = %LinearMcpClient{
+      config: %TrackerConfig{
+        kind: "linear_mcp",
+        project_slug: "Pilot",
+        active_states: ["Todo"],
+        mcp_tools: %{"list_issues" => ["old_list_issues", "current_list_issues"]}
+      },
+      gateway: gateway
+    }
+
+    assert LinearMcpClient.fetch_candidate_issues(client) == []
+    assert_receive {:gateway, "old_list_issues", _}
+    assert_receive {:gateway, "current_list_issues", _}
+  end
+
+  test "Linear MCP client does not try aliases for non-discovery tool errors" do
+    parent = self()
+
+    gateway = fn tool, _arguments ->
+      send(parent, {:gateway, tool})
+
+      raise Symphony.Error,
+        code: :linear_mcp_tool_error,
+        message:
+          Jason.encode!(%{
+            "content" => [%{"type" => "text", "text" => "user rejected MCP tool call"}],
+            "isError" => true
+          })
+    end
+
+    client = %LinearMcpClient{
+      config: %TrackerConfig{
+        kind: "linear_mcp",
+        project_slug: "Pilot",
+        active_states: ["Todo"],
+        mcp_tools: %{"list_issues" => ["first_list_issues", "second_list_issues"]}
+      },
+      gateway: gateway
+    }
+
+    assert_raise Symphony.Error, ~r/user rejected MCP tool call/, fn ->
+      LinearMcpClient.fetch_candidate_issues(client)
+    end
+
+    assert_receive {:gateway, "first_list_issues"}
+    refute_receive {:gateway, "second_list_issues"}
   end
 
   test "Linear MCP client writes comments and state" do
@@ -254,14 +324,13 @@ defmodule Symphony.TrackerTest do
 
     LinearMcpClient.save_issue_state(client, "ENG-1", "completed")
 
-    assert_received {:gateway, "linear mcp server_list_comments",
+    assert_received {:gateway, "_list_comments",
                      %{"issueId" => "ENG-1", "limit" => 250, "orderBy" => "createdAt"}}
 
-    assert_received {:gateway, "linear mcp server_save_comment",
+    assert_received {:gateway, "_save_comment",
                      %{"body" => "## Codex Workpad\nnew", "id" => "comment-1"}}
 
-    assert_received {:gateway, "linear mcp server_save_issue",
-                     %{"id" => "ENG-1", "state" => "completed"}}
+    assert_received {:gateway, "_save_issue", %{"id" => "ENG-1", "state" => "completed"}}
   end
 
   @tag :tmp_dir
@@ -293,7 +362,7 @@ defmodule Symphony.TrackerTest do
 
     gateway = %CodexMcpGateway{command: "python3 #{fake_server}", cwd: tmp_dir}
 
-    assert CodexMcpGateway.call_tool(gateway, "linear mcp server_save_issue", %{
+    assert CodexMcpGateway.call_tool(gateway, "_save_issue", %{
              "id" => "ENG-1",
              "state" => "completed"
            }) == %{"ok" => true}

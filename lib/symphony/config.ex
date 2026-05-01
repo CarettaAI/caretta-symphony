@@ -14,6 +14,7 @@ defmodule Symphony.Config do
               team: nil,
               mcp_command: "codex app-server",
               mcp_server: "codex_apps",
+              mcp_tools: %{},
               active_states: ["Todo", "In Progress"],
               terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
               review_states: ["In Review", "Merging"],
@@ -273,6 +274,7 @@ defmodule Symphony.Config do
       team: string_or_nil(get(tracker_raw, "team")),
       mcp_command: to_string(get(tracker_raw, "mcp_command", "codex app-server")),
       mcp_server: to_string(get(tracker_raw, "mcp_server", "codex_apps")),
+      mcp_tools: mcp_tool_map(get(tracker_raw, "mcp_tools"), "tracker.mcp_tools"),
       active_states:
         string_list(
           get(tracker_raw, "active_states"),
@@ -832,6 +834,44 @@ defmodule Symphony.Config do
 
   defp string_list(_value, _default, field_name) do
     raise Error, code: :config_invalid_value, message: "#{field_name} must be a list of strings"
+  end
+
+  defp mcp_tool_map(nil, _field_name), do: %{}
+
+  defp mcp_tool_map(value, field_name) when is_map(value) do
+    Enum.reduce(value, %{}, fn {operation, tool_names}, acc ->
+      operation = operation |> to_string() |> String.trim()
+
+      if operation == "" do
+        raise Error,
+          code: :config_invalid_value,
+          message: "#{field_name} keys must be non-empty strings"
+      end
+
+      Map.put(acc, operation, mcp_tool_names(tool_names, "#{field_name}.#{operation}"))
+    end)
+  end
+
+  defp mcp_tool_map(_value, field_name) do
+    raise Error, code: :config_invalid_value, message: "#{field_name} must be an object"
+  end
+
+  defp mcp_tool_names(value, _field_name) when is_binary(value), do: [value]
+
+  defp mcp_tool_names(value, field_name) when is_list(value) do
+    if Enum.all?(value, &is_binary/1) do
+      value
+    else
+      raise Error,
+        code: :config_invalid_value,
+        message: "#{field_name} must be a string or list of strings"
+    end
+  end
+
+  defp mcp_tool_names(_value, field_name) do
+    raise Error,
+      code: :config_invalid_value,
+      message: "#{field_name} must be a string or list of strings"
   end
 
   defp int_value(value, default, field_name, opts \\ []) do

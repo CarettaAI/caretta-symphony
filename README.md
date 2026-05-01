@@ -103,6 +103,13 @@ tracker:
   blocked_escalation_mentions: ["@operator"]
   required_labels: ["codex"]
   mcp_command: /Applications/Codex.app/Contents/Resources/codex app-server
+  # Optional compatibility override when Codex app tool names change:
+  # mcp_tools:
+  #   list_issues: ["_list_issues", "linear._list_issues"]
+  #   get_issue: ["_get_issue", "linear._get_issue"]
+  #   list_comments: ["_list_comments", "linear._list_comments"]
+  #   save_comment: ["_save_comment", "linear._save_comment"]
+  #   save_issue: ["_save_issue", "linear._save_issue"]
 workspace:
   root: ./.symphony-workspaces
 agent:

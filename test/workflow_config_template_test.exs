@@ -20,6 +20,9 @@ defmodule Symphony.WorkflowConfigTemplateTest do
       api_key: $LINEAR_API_KEY
       project_slug: demo
       required_labels: ["Codex"]
+      mcp_tools:
+        list_issues: ["linear._list_issues", "_list_issues"]
+        save_issue: "_save_issue"
     workspace:
       root: ./work
     agent:
@@ -43,6 +46,12 @@ defmodule Symphony.WorkflowConfigTemplateTest do
     assert config.tracker.rework_state == "Rework"
     assert config.tracker.done_state == "Done"
     assert config.tracker.merge_base_branch == "dev"
+
+    assert config.tracker.mcp_tools == %{
+             "list_issues" => ["linear._list_issues", "_list_issues"],
+             "save_issue" => ["_save_issue"]
+           }
+
     assert config.tracker.blocked_escalation_enabled
     assert config.tracker.blocked_escalation_mentions == []
     assert config.tracker.review_states == ["In Review", "Merging"]

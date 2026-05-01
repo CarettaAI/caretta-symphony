@@ -260,11 +260,43 @@ defmodule Symphony.Tracker do
 
   defmodule LinearMcpClient do
     @linear_page_size 50
-    @linear_mcp_tool_list_issues "linear mcp server_list_issues"
-    @linear_mcp_tool_get_issue "linear mcp server_get_issue"
-    @linear_mcp_tool_list_comments "linear mcp server_list_comments"
-    @linear_mcp_tool_save_comment "linear mcp server_save_comment"
-    @linear_mcp_tool_save_issue "linear mcp server_save_issue"
+    @default_mcp_tools %{
+      "list_issues" => [
+        "_list_issues",
+        "linear._list_issues",
+        "list_issues",
+        "linear.list_issues",
+        "linear mcp server_list_issues"
+      ],
+      "get_issue" => [
+        "_get_issue",
+        "linear._get_issue",
+        "get_issue",
+        "linear.get_issue",
+        "linear mcp server_get_issue"
+      ],
+      "list_comments" => [
+        "_list_comments",
+        "linear._list_comments",
+        "list_comments",
+        "linear.list_comments",
+        "linear mcp server_list_comments"
+      ],
+      "save_comment" => [
+        "_save_comment",
+        "linear._save_comment",
+        "save_comment",
+        "linear.save_comment",
+        "linear mcp server_save_comment"
+      ],
+      "save_issue" => [
+        "_save_issue",
+        "linear._save_issue",
+        "save_issue",
+        "linear.save_issue",
+        "linear mcp server_save_issue"
+      ]
+    }
 
     defstruct config: nil, gateway: nil
 
@@ -289,14 +321,14 @@ defmodule Symphony.Tracker do
     def fetch_issue_states_by_ids(%__MODULE__{} = client, ids) do
       Enum.map(ids, fn id ->
         client
-        |> call_gateway(@linear_mcp_tool_get_issue, %{"id" => id, "includeRelations" => true})
+        |> call_gateway("get_issue", %{"id" => id, "includeRelations" => true})
         |> normalize_issue()
       end)
     end
 
     def list_issue_comments(%__MODULE__{} = client, issue_id) do
       body =
-        call_gateway(client, @linear_mcp_tool_list_comments, %{
+        call_gateway(client, "list_comments", %{
           "issueId" => issue_id,
           "limit" => 250,
           "orderBy" => "createdAt"
@@ -327,7 +359,7 @@ defmodule Symphony.Tracker do
           %{"body" => body, "issueId" => issue_id}
         end
 
-      response = call_gateway(client, @linear_mcp_tool_save_comment, args)
+      response = call_gateway(client, "save_comment", args)
 
       unless is_map(response),
         do:
@@ -341,7 +373,7 @@ defmodule Symphony.Tracker do
 
     def save_issue_state(%__MODULE__{} = client, issue_id, state) do
       response =
-        call_gateway(client, @linear_mcp_tool_save_issue, %{"id" => issue_id, "state" => state})
+        call_gateway(client, "save_issue", %{"id" => issue_id, "state" => state})
 
       unless is_map(response),
         do:
@@ -363,7 +395,7 @@ defmodule Symphony.Tracker do
         |> put_if("label", List.first(client.config.required_labels))
         |> put_if("cursor", cursor)
 
-      body = call_gateway(client, @linear_mcp_tool_list_issues, args)
+      body = call_gateway(client, "list_issues", args)
       nodes = body["issues"]
 
       unless is_list(nodes) do
@@ -393,7 +425,7 @@ defmodule Symphony.Tracker do
       Enum.map(issues, fn issue ->
         if String.downcase(issue.state) == "todo" do
           client
-          |> call_gateway(@linear_mcp_tool_get_issue, %{
+          |> call_gateway("get_issue", %{
             "id" => issue.identifier,
             "includeRelations" => true
           })
@@ -474,14 +506,49 @@ defmodule Symphony.Tracker do
           message: "Linear MCP issue payload is not an object"
         )
 
-    defp call_gateway(%__MODULE__{gateway: gateway}, tool, args) when is_function(gateway, 2),
-      do: gateway.(tool, args)
+    defp call_gateway(%__MODULE__{} = client, operation, args) do
+      candidates = tool_candidates(client, operation)
+      call_gateway_candidates(client, operation, args, candidates, [])
+    end
 
-    defp call_gateway(%__MODULE__{gateway: gateway}, tool, args) when not is_nil(gateway) do
+    defp call_gateway_candidates(client, operation, args, [tool | rest], failures) do
+      try do
+        call_gateway_tool(client, tool, args)
+      rescue
+        error in Error ->
+          if tool_unavailable_error?(error) do
+            failures = failures ++ [{tool, error}]
+
+            case rest do
+              [] ->
+                raise Error,
+                  code: :linear_mcp_tool_error,
+                  message: unavailable_tool_message(operation, failures)
+
+              _ ->
+                call_gateway_candidates(client, operation, args, rest, failures)
+            end
+          else
+            reraise error, __STACKTRACE__
+          end
+      end
+    end
+
+    defp call_gateway_candidates(_client, operation, _args, [], failures) do
+      raise Error,
+        code: :linear_mcp_tool_error,
+        message: unavailable_tool_message(operation, failures)
+    end
+
+    defp call_gateway_tool(%__MODULE__{gateway: gateway}, tool, args)
+         when is_function(gateway, 2),
+         do: gateway.(tool, args)
+
+    defp call_gateway_tool(%__MODULE__{gateway: gateway}, tool, args) when not is_nil(gateway) do
       Symphony.Tracker.CodexMcpGateway.call_tool(gateway, tool, args)
     end
 
-    defp call_gateway(%__MODULE__{} = client, tool, args) do
+    defp call_gateway_tool(%__MODULE__{} = client, tool, args) do
       gateway =
         struct(Symphony.Tracker.CodexMcpGateway,
           command: client.config.mcp_command,
@@ -489,6 +556,38 @@ defmodule Symphony.Tracker do
         )
 
       Symphony.Tracker.CodexMcpGateway.call_tool(gateway, tool, args)
+    end
+
+    defp tool_candidates(%__MODULE__{} = client, operation) do
+      configured =
+        client.config
+        |> Map.get(:mcp_tools, %{})
+        |> Map.get(operation, []) || []
+
+      configured = List.wrap(configured)
+      defaults = Map.fetch!(@default_mcp_tools, operation)
+
+      (configured ++ defaults)
+      |> Enum.map(&(to_string(&1) |> String.trim()))
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+    end
+
+    defp tool_unavailable_error?(%Error{code: :linear_mcp_tool_error, message: message}) do
+      message
+      |> to_string()
+      |> String.downcase()
+      |> String.contains?(["unknown tool", "tool not found", "no such tool"])
+    end
+
+    defp tool_unavailable_error?(_), do: false
+
+    defp unavailable_tool_message(operation, failures) do
+      tried = failures |> Enum.map(fn {tool, _error} -> tool end) |> Enum.join(", ")
+      {_tool, last_error} = List.last(failures) || {nil, nil}
+      last_message = if last_error, do: Exception.message(last_error), else: "none"
+
+      "Linear MCP tool unavailable for #{operation}; tried #{tried}; last error: #{last_message}"
     end
 
     defp dedupe_issues(issues) do
